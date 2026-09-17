@@ -297,6 +297,7 @@ class FixedEnvOrchestrator:
         all_logprobs: List[float] = []
         assistant_responses: List[str] = []
         rewards: List[float] = []
+        reward_diagnostics = []
 
         # Session ID for consistent hashing: all turns of the same episode
         # route to the same SGLang engine for prefix cache reuse. Mirrors
@@ -322,10 +323,18 @@ class FixedEnvOrchestrator:
 
                 if turn > 0:
                     messages.append({"role": "user", "content": obs})
-                    obs_tokens, loss_mask = get_token_delta(
-                        tokenizer=self.model.tokenizer,
-                        messages=messages,
-                    )
+                    if env_instance.source == "envduels":
+                        from spade.core.utils.token_utils import get_observation_delta
+                        obs_tokens, loss_mask = get_observation_delta(
+                            self.model.tokenizer, messages, all_tokens,
+                            getattr(self.model, "chat_template_kwargs", None),
+                        )
+                    else:
+                        obs_tokens, loss_mask = get_token_delta(
+                            tokenizer=self.model.tokenizer,
+                            messages=messages,
+                            chat_template_kwargs=getattr(self.model, "chat_template_kwargs", None),
+                        )
                     all_tokens.extend(obs_tokens)
                     all_masks.extend(loss_mask)
                     all_logprobs.extend([0.0] * len(obs_tokens))
@@ -368,7 +377,15 @@ class FixedEnvOrchestrator:
                 raw_action = result['text']
                 response_tokens = result['token_ids']
 
-                messages.append({"role": "assistant", "content": raw_action})
+                assistant_message = {"role": "assistant", "content": raw_action}
+                if (env_instance.source == "envduels"
+                        and getattr(self.model, "chat_template_kwargs", {}).get("enable_thinking", False)
+                        and "</think>" in raw_action and "<think>" not in raw_action):
+                    # Qwen3.8's template expects a separate reasoning field.
+                    reasoning, content = raw_action.split("</think>", 1)
+                    assistant_message["reasoning_content"] = reasoning.strip()
+                    assistant_message["content"] = content.lstrip("\n")
+                messages.append(assistant_message)
                 all_tokens.extend(response_tokens)
                 all_masks.extend([1] * len(response_tokens))
                 all_logprobs.extend(result['logprobs'])
@@ -398,8 +415,12 @@ class FixedEnvOrchestrator:
                     action = parse_action(raw_action, self.config.action_format)
                 else:
                     action = _parse_action_passthrough(raw_action)
-                obs, reward, terminated, truncated, _ = env_instance.step(action)
+                obs, reward, terminated, truncated, step_info = env_instance.step(action)
                 rewards.append(reward)
+                reward_diagnostics.append({
+                    key: step_info[key] for key in ("raw_reward", "success", "format_error")
+                    if key in step_info
+                })
 
                 if terminated or truncated:
                     break
@@ -449,12 +470,14 @@ class FixedEnvOrchestrator:
             turn_count=turn,
             messages=messages,
             metadata={
-                "game_file": env_instance.env_id,
+                **env_instance.metadata,
+                "game_file": env_instance.metadata.get("problem_id", env_instance.env_id),
                 "skill": env_instance.category,
                 "env_id": env_instance.env_id,
                 "difficulty": env_instance.difficulty,
                 "source": env_instance.source,
                 "rewards": rewards,
+                "reward_diagnostics": reward_diagnostics,
             },
         )
 
@@ -497,6 +520,16 @@ class FixedEnvOrchestrator:
             pool_entries = self._select_pool_entries(num_envs)
             for env_id, difficulty in pool_entries:
                 adapter = self._env_to_adapter[env_id]
+                if self.same_problem_groups or getattr(adapter, "requires_same_problem_groups", False):
+                    try:
+                        group = adapter.create_instances_same_problem(
+                            env_id, difficulty=difficulty, n=trajectories_per_env
+                        )
+                        instances.extend((inst, env_id) for inst in group)
+                    except Exception as e:
+                        logger.warning("[FIXED-ENV] Failed to create problem group: %s", e)
+                        num_create_failed += trajectories_per_env
+                    continue
                 for _ in range(trajectories_per_env):
                     try:
                         instance = adapter.create_instance(env_id, difficulty=difficulty)
@@ -519,7 +552,7 @@ class FixedEnvOrchestrator:
                 else:
                     difficulty = 0
 
-                if self.same_problem_groups:
+                if self.same_problem_groups or getattr(adapter, "requires_same_problem_groups", False):
                     # One shared problem per env group (per-prompt GRPO,
                     # RLVE n-samples-per-prompt semantics)
                     try:
@@ -577,7 +610,7 @@ class FixedEnvOrchestrator:
             actor_trajectories.append(traj)
             num_succeeded += 1
 
-            if use_fixed_pool:
+            if use_fixed_pool and "problem_id" not in traj.metadata:
                 # Override game_file to encode (env_id, difficulty) for per-entry
                 # reward normalization grouping
                 env_id = traj.metadata.get("env_id", "")

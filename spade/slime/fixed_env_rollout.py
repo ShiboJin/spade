@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 _FIXED_ENV_ORCHESTRATOR = None
 
 
-def _parse_env_sources(source_specs: List[str]) -> List[EnvironmentAdapter]:
+def _parse_env_sources(source_specs: List[str], envduels_ids_file=None, envduels_seed=42) -> List[EnvironmentAdapter]:
     """Parse --spade-fixed-env-source specs into environment adapters.
 
     Formats:
@@ -57,7 +57,13 @@ def _parse_env_sources(source_specs: List[str]) -> List[EnvironmentAdapter]:
         if not spec:
             continue
 
-        if spec.startswith("rlve:"):
+        if spec.startswith("envduels:"):
+            from spade.core.envs.envduels_adapter import EnvDuelsAdapter
+            adapters.append(EnvDuelsAdapter(
+                spec[len("envduels:"):], env_ids_file=envduels_ids_file,
+                seed=envduels_seed,
+            ))
+        elif spec.startswith("rlve:"):
             name = spec[5:]
             if name == "*":
                 rlve_names = ["*"]
@@ -333,13 +339,21 @@ def _get_orchestrator(args: Namespace) -> FixedEnvOrchestrator:
         )
     else:
         # Parse env sources from --spade-fixed-env-source
-        adapters = _parse_env_sources(args.spade_fixed_env_source)
+        adapters = _parse_env_sources(
+            args.spade_fixed_env_source,
+            envduels_ids_file=getattr(args, "spade_envduels_ids_file", None),
+            envduels_seed=getattr(args, "spade_envduels_seed", 42),
+        )
 
     if not adapters:
         raise ValueError(
             "No valid environment adapters found. "
             "Check --spade-fixed-env-source configuration."
         )
+
+    has_envduels = any(getattr(a, "requires_same_problem_groups", False) for a in adapters)
+    if has_envduels and not all(getattr(a, "requires_same_problem_groups", False) for a in adapters):
+        raise ValueError("This first EnvDuels integration requires an EnvDuels-only run")
 
     spade_config = SpadeConfig(
         actor_temperature=args.spade_actor_temperature,
@@ -382,6 +396,8 @@ def _get_orchestrator(args: Namespace) -> FixedEnvOrchestrator:
         gamma_fast=args.spade_lp_gamma_fast,
         gamma_slow=args.spade_lp_gamma_slow,
     )
+    if all(getattr(adapter, "requires_same_problem_groups", False) for adapter in adapters):
+        difficulty_controller = None
 
     _FIXED_ENV_ORCHESTRATOR = FixedEnvOrchestrator(
         model=model_adapter,
@@ -430,6 +446,14 @@ def spade_fixed_env_rollout(
 
     global_batch_size = args.global_batch_size
     trajectories_per_env = args.spade_trajectories_per_game
+    envduels_run = all(
+        getattr(a, "requires_same_problem_groups", False) for a in orchestrator.adapters
+    )
+    if envduels_run and (
+        trajectories_per_env < 2 or global_batch_size < 1
+        or global_batch_size % trajectories_per_env
+    ):
+        raise ValueError("EnvDuels GRPO needs at least two plays per problem and a divisible batch size")
 
     # Overprovision by 25% to account for failures, then trim to exact batch size
     overprovision = int(global_batch_size * 1.25) + 2
@@ -441,6 +465,12 @@ def spade_fixed_env_rollout(
             trajectories_per_env=trajectories_per_env,
         )
     )
+
+    if envduels_run:
+        from spade.core.envs.envduels_adapter import select_complete_problem_groups
+        actor_trajectories = select_complete_problem_groups(
+            actor_trajectories, global_batch_size, trajectories_per_env,
+        )
 
     # Convert to Slime samples
     all_samples: List[Sample] = []

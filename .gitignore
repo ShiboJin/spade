@@ -245,3 +245,4 @@ runs/
 .claude/settings.local.json
 # Generated local outputs
 /outputs/
+/checkpoints/

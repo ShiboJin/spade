@@ -632,7 +632,15 @@ def add_spade_arguments(parser):
         default=None,
         help='Environment sources for fixed_env mode. '
              'Formats: "rlve:Sorting", "rlve:*", "gem:game:Sudoku-v0-easy", "gem:*", '
-             '"game_file:/path/to/dir"',
+             '"game_file:/path/to/dir", "envduels:/path/to/export"',
+    )
+    fixed_env_args.add_argument(
+        "--spade-envduels-ids-file", default=None,
+        help="Optional text file of manifest IDs, one per line; default uses all environments, ignoring export splits.",
+    )
+    fixed_env_args.add_argument(
+        "--spade-envduels-seed", type=int, default=42,
+        help="Seed for EnvDuels problem sampling (fresh runs).",
     )
     fixed_env_args.add_argument(
         "--spade-fixed-env-same-problem",

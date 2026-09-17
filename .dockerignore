@@ -1,0 +1,8 @@
+.git
+.venv
+checkpoints
+outputs
+runtime-cache
+tinker-cookbook
+**/__pycache__
+**/.git

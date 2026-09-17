@@ -3,6 +3,25 @@
 from typing import Any
 
 
+def get_observation_delta(tokenizer, messages, prefix_tokens, chat_template_kwargs=None):
+    """Append a rendered observation without rewriting sampled model tokens.
+
+    Compare against the *actual* sampled prefix, including EOS and thinking
+    tokens, rather than a re-rendered assistant turn that may add whitespace.
+    Fail if the template would remove/rewrite previous reasoning.
+    """
+    rendered = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True,
+        **(chat_template_kwargs or {}),
+    )
+    prefix = tokenizer.decode(prefix_tokens, skip_special_tokens=False,
+                              clean_up_tokenization_spaces=False)
+    if not rendered.startswith(prefix):
+        raise ValueError("Chat template rewrites the sampled prefix; check thinking preservation")
+    delta = tokenizer.encode(rendered[len(prefix):], add_special_tokens=False)
+    return delta, [0] * len(delta)
+
+
 def get_token_delta(
     tokenizer: Any,
     messages: list[dict[str, str]],
