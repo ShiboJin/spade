@@ -21,12 +21,20 @@ class RuntimeTests(unittest.TestCase):
 
     def test_spruce_build_jobs_are_bounded(self):
         root = Path(__file__).resolve().parents[1]
-        for value in ("0", "5", "64", "bad"):
+        for value in ("0", "17", "64", "bad", "01"):
             with self.subTest(value=value):
                 result = subprocess.run(["bash", "scripts/build_spruce_foundation.sh"],
                     cwd=root, env={**os.environ, "BUILD_JOBS": value},
                     capture_output=True, text=True)
                 self.assertEqual(result.returncode, 2)
+
+    def test_spruce_larger_parallelism_plan(self):
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(["bash", "scripts/build_spruce_foundation.sh", "--plan"],
+            cwd=root, env={**os.environ, "BUILD_JOBS": "16"},
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("BUILD_JOBS=16", result.stdout)
 
     def test_foundation_cannot_be_used_as_training_image(self):
         root = Path(__file__).resolve().parents[1]

@@ -7,7 +7,7 @@ MODE="${1:---plan}"
     echo 'Usage: bash scripts/build_spruce_foundation.sh [--plan|--build]' >&2; exit 2;
 }
 BUILD_JOBS="${BUILD_JOBS:-4}"
-[[ "$BUILD_JOBS" =~ ^[1-4]$ ]] || { echo 'BUILD_JOBS must be 1..4' >&2; exit 2; }
+[[ "$BUILD_JOBS" =~ ^([1-9]|1[0-6])$ ]] || { echo 'BUILD_JOBS must be 1..16' >&2; exit 2; }
 CMD=(docker build --target foundation --build-arg "BUILD_JOBS=$BUILD_JOBS"
     -f "$ROOT/docker/envduels/Dockerfile.spruce-cu124"
     -t "envduels-spade:spruce-cu124-foundation" "$ROOT/docker/envduels")

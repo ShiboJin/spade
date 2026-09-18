@@ -65,6 +65,19 @@ class LauncherTests(unittest.TestCase):
         del self.env["MODEL_CONFIG"]
         self.assertNotEqual(self.run_launcher().returncode, 0)
 
+    def test_exact_environment_count_is_enforced(self):
+        self.env["ENVDUELS_EXPECTED_COUNT"] = "90"
+        result = self.run_launcher()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Expected 90 environments, got 1", result.stderr)
+
+    def test_hyperparameters_reach_training_command(self):
+        self.env.update(LR="5e-7", SAVE_INTERVAL="10", TRAIN_SEED="99", NUM_ROLLOUT="100")
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for flag in ("--lr 5e-7", "--save-interval 10", "--seed 99", "--num-rollout 100"):
+            self.assertIn(flag, result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,11 @@
 # Qwen3.8-27B on EnvDuels: runbook
 
+For the all-90-environments + AIME26 experiment, edit
+`configs/envduels90_aime26.yaml` and use `scripts/run_envduels_experiment.py`
+(or its existing `.sh` wrapper).
+See `cmd/games/ENVDUELS90_AIME26.md` for the separate training/eval protocol
+and the remaining runtime/checkpoint-export validation requirements.
+
 Run all commands from the SPADE repository. The code is prepared for a single
 node with 8 allocated A100 80GB GPUs out of the available 10. This is an initial
 layout, not a measured throughput or memory guarantee. GPU conversion and

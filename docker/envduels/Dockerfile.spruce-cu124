@@ -21,7 +21,7 @@ ENV CUDA_HOME=/usr/local/cuda TORCH_CUDA_ARCH_LIST=8.0 \
     USE_CUDA=1 USE_CUDNN=1 USE_DISTRIBUTED=1 USE_NCCL=1 \
     BUILD_TEST=0 USE_CUSPARSELT=0 USE_CUFILE=0 \
     PYTORCH_BUILD_VERSION=2.11.0 PYTORCH_BUILD_NUMBER=1
-RUN test "$BUILD_JOBS" -ge 1 && test "$BUILD_JOBS" -le 4 && \
+RUN test "$BUILD_JOBS" -ge 1 && test "$BUILD_JOBS" -le 16 && \
     MAX_JOBS="$BUILD_JOBS" CMAKE_BUILD_PARALLEL_LEVEL="$BUILD_JOBS" \
     python3 setup.py bdist_wheel && \
     python3 -m pip install --no-deps dist/torch-*.whl

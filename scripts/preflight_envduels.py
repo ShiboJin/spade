@@ -49,6 +49,9 @@ def check():
 
     from spade.core.envs.envduels_adapter import EnvDuelsAdapter
     adapter = EnvDuelsAdapter(export, env_ids_file=os.environ.get("ENVDUELS_IDS_FILE"))
+    expected_count = os.environ.get("ENVDUELS_EXPECTED_COUNT")
+    if expected_count and len(adapter.list_environments()) != int(expected_count):
+        raise ValueError(f"Expected {expected_count} environments, got {len(adapter.list_environments())}")
     for env_id in adapter.list_environments():
         row = adapter.rows[env_id]
         path = (export / row["source"]).resolve()

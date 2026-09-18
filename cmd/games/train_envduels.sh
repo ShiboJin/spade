@@ -56,9 +56,12 @@ source "$MODEL_CONFIG"
 
 # Read metadata only; this does not import or execute any exported environment.
 "$PYTHON_BIN" -c '
-import sys
+import os, sys
 from spade.core.envs.envduels_adapter import EnvDuelsAdapter
 a = EnvDuelsAdapter(sys.argv[1], env_ids_file=sys.argv[2] or None)
+expected = os.environ.get("ENVDUELS_EXPECTED_COUNT")
+if expected and len(a.list_environments()) != int(expected):
+    raise ValueError(f"Expected {expected} environments, got {len(a.list_environments())}")
 print("Selected environments:", len(a.list_environments()))
 ' "$ENVDUELS_EXPORT_DIR" "${ENVDUELS_IDS_FILE:-}"
 
@@ -84,6 +87,7 @@ TRAIN=("$PYTHON_BIN" -m train_spade_slime
     --advantage-estimator grpo --disable-grpo-std-normalization --disable-rewards-normalization
     --kl-loss-coef 0.0 --entropy-coef 0.0 --eps-clip 0.2 --eps-clip-high 0.28 --use-tis
     --optimizer adam --lr "${LR:-1e-6}" --lr-decay-style constant
+    --seed "${TRAIN_SEED:-42}"
     --weight-decay 0.1 --adam-beta1 0.9 --adam-beta2 0.98
     --tensor-model-parallel-size "$TP" --pipeline-model-parallel-size "$PP"
     --context-parallel-size "$CP" --use-dynamic-batch-size
@@ -128,4 +132,15 @@ fi
     echo 'Missing Megatron checkpoint tracker: run conversion first' >&2; exit 2;
 }
 command -v ray >/dev/null
+"$PYTHON_BIN" -c '
+import hashlib, json, pathlib, sys
+out, manifest, *argv = sys.argv[1:]
+root = pathlib.Path(out)
+root.mkdir(parents=True, exist_ok=False)
+data = pathlib.Path(manifest).read_bytes()
+(root / "resolved_training.json").write_text(json.dumps({
+    "argv": argv, "manifest_sha256": hashlib.sha256(data).hexdigest(),
+    "manifest": json.loads(data),
+}, indent=2))
+' "$OUTPUT_DIR" "$ENVDUELS_EXPORT_DIR/manifest.json" "${TRAIN[@]}"
 exec "${COMMAND[@]}"

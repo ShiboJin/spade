@@ -1,6 +1,11 @@
 # Spruce driver 555: experimental CUDA 12.4 build track
 
-Status: configuration only; not built, not GPU-tested, not a training runtime.
+Status: 16-job retry built successfully; image ID
+`sha256:13574f8da610cf5bbe602cf0375f7a8eb603d9b44bcc670c5931a8050d23f71d`.
+CPU import reports Torch 2.11.0 / CUDA 12.4. Still a foundation, not a training runtime.
+A tiny BF16 GPU matrix multiplication passed on spruce A100 GPU 0 using this
+image and the unchanged 555.42.02 driver. This does not test NCCL, Triton,
+SGLang, Megatron, weight conversion or training.
 The existing CUDA 12.9 Dockerfile and default launcher are unchanged.
 Do not set ENVDUELS_IMAGE to the foundation image for training.
 
@@ -35,7 +40,10 @@ bash scripts/build_spruce_foundation.sh --plan
 BUILD_JOBS=4 bash scripts/build_spruce_foundation.sh --build
 ```
 
-The four-job setting bounds compiler parallelism, not total CPU or memory.
+The default is four compiler jobs; BUILD_JOBS accepts 1..16. The interrupted
+four-job build was successfully retried with 16 jobs after checking shared host load.
+This bounds compiler parallelism, not total CPU or memory. It is not a fix
+for Docker connection errors. An interrupted RUN layer may need recompilation.
 Build context is only docker/envduels; weights and exports are not sent.
 No host driver installation, privileged container, Docker socket mount,
 GPU access, host Ray access, or cleanup of unrelated data is requested.

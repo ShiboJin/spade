@@ -11,8 +11,8 @@ fi
 case "$ACTION" in
     build)
         exec docker build -f "$ROOT/docker/envduels/Dockerfile" -t "$IMAGE" "$ROOT" ;;
-    plan|check|convert|smoke|train) ;;
-    *) echo 'Usage: bash scripts/envduels_runtime.sh {build|plan|check|convert|smoke|train}' >&2; exit 2 ;;
+    plan|check|convert|smoke|train|eval) ;;
+    *) echo 'Usage: bash scripts/envduels_runtime.sh {build|plan|check|convert|smoke|train|eval}' >&2; exit 2 ;;
 esac
 RUN=(docker run --rm --init --shm-size=16g --ulimit memlock=-1 --ulimit stack=67108864
     --user "$(id -u):$(id -g)"
@@ -25,7 +25,7 @@ RUN=(docker run --rm --init --shm-size=16g --ulimit memlock=-1 --ulimit stack=67
     --env TORCHINDUCTOR_CACHE_DIR=/tmp/envduels-inductor --env USER
     --env FLASHINFER_WORKSPACE_BASE=/tmp/envduels-flashinfer
     --env NUM_GPUS="${NUM_GPUS:-8}" --env CONVERT_GPUS="${NUM_GPUS:-8}")
-for name in TP PP CP ROLLOUT_TP GLOBAL_BATCH_SIZE GROUP_SIZE MAX_TURNS MAX_CONTEXT_LENGTH ACTOR_MAX_TOKENS MAX_TOKENS_PER_GPU THINKING CPU_OFFLOAD ENVDUELS_SEED LR TEMPERATURE; do
+for name in TP PP CP ROLLOUT_TP GLOBAL_BATCH_SIZE GROUP_SIZE NUM_ROLLOUT MAX_TURNS MAX_CONTEXT_LENGTH ACTOR_MAX_TOKENS MAX_TOKENS_PER_GPU THINKING CPU_OFFLOAD ENVDUELS_SEED LR TEMPERATURE SAVE_INTERVAL TRAIN_SEED ENVDUELS_EXPECTED_COUNT ROLLOUT_MEMORY_FRACTION AIME26_DATA EVAL_BENCHMARK EVAL_DATA EVAL_HF_CHECKPOINT EVAL_N_SAMPLES EVAL_TEMPERATURE EVAL_TOP_P EVAL_TOP_K EVAL_MAX_TOKENS EVAL_CONTEXT_LENGTH EVAL_THINKING EVAL_SEED EVAL_TP EVAL_MAX_CONCURRENT; do
     [[ ! -v "$name" ]] || RUN+=(--env "$name=${!name}")
 done
 # Selection/resume files should be inside the mounted checkout; supply container paths.
@@ -41,11 +41,15 @@ case "$ACTION" in
         : "${GPU_IDS:?Set GPU_IDS to the allocated GPU indices, e.g. 0,1,3,4,6,7,8,9}"
         RUN+=(--gpus "\"device=$GPU_IDS\"")
         CMD='bash scripts/convert_qwen38.sh --run' ;;
+    eval)
+        : "${GPU_IDS:?Set GPU_IDS to GPUs allocated for evaluation}"
+        RUN+=(--gpus "\"device=$GPU_IDS\"")
+        CMD='python scripts/eval_benchmark.py --run' ;;
     smoke|train)
         : "${GPU_IDS:?Set GPU_IDS to the allocated GPU indices}"
         RUN+=(--gpus "\"device=$GPU_IDS\"")
         if [[ "$ACTION" == smoke ]]; then
-            RUN+=(--env NUM_ROLLOUT=2)
+            RUN+=(--env NUM_ROLLOUT=2 --env SAVE_INTERVAL=1)
         else
             : "${NUM_ROLLOUT:?Set NUM_ROLLOUT explicitly for training}"
             RUN+=(--env "NUM_ROLLOUT=$NUM_ROLLOUT")
@@ -57,10 +61,15 @@ ray start --head --node-ip-address=127.0.0.1 --num-gpus="$NUM_GPUS" --disable-us
 export RAY_ADDRESS=http://127.0.0.1:8265
 bash cmd/games/train_envduels.sh --run' ;;
 esac
-if [[ "$ACTION" == convert || "$ACTION" == smoke || "$ACTION" == train ]]; then
+if [[ "$ACTION" == convert || "$ACTION" == smoke || "$ACTION" == train || "$ACTION" == eval ]]; then
     [[ "$GPU_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo 'GPU_IDS must be comma-separated numeric indices' >&2; exit 2; }
     IFS=, read -r -a SELECTED_GPUS <<< "$GPU_IDS"
     (( ${#SELECTED_GPUS[@]} == ${NUM_GPUS:-8} )) || { echo 'GPU_IDS count differs from NUM_GPUS' >&2; exit 2; }
+    if [[ "$ACTION" == eval ]]; then
+        [[ "${EVAL_TP:-2}" =~ ^[1-9][0-9]*$ ]] && (( ${EVAL_TP:-2} <= ${NUM_GPUS:-8} )) || {
+            echo 'EVAL_TP must fit within the allocated GPUs' >&2; exit 2;
+        }
+    fi
     declare -A SEEN_GPUS=()
     for gpu in "${SELECTED_GPUS[@]}"; do
         [[ ! -v "SEEN_GPUS[$gpu]" ]] || { echo "Duplicate GPU index: $gpu" >&2; exit 2; }
@@ -75,7 +84,7 @@ if [[ "$ACTION" == convert || "$ACTION" == smoke || "$ACTION" == train ]]; then
     fi
 fi
 # No --network=host, no published ports, no Docker socket mount. Ray stays isolated.
-if [[ "$ACTION" == convert || "$ACTION" == smoke || "$ACTION" == train ]]; then
+if [[ "$ACTION" == convert || "$ACTION" == smoke || "$ACTION" == train || "$ACTION" == eval ]]; then
     mkdir -p "$ROOT/outputs/logs"
     LOG_FILE="$ROOT/outputs/logs/$ACTION-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
     echo "Persistent console log: $LOG_FILE"
