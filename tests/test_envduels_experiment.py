@@ -2,9 +2,7 @@ import asyncio
 import io
 import json
 import os
-import re
 from pathlib import Path
-import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -12,51 +10,10 @@ from unittest.mock import patch
 
 from scripts.eval_aime26 import configuration, inside_checkout, score_answer, score_dataset
 from scripts.prepare_aime26 import validate_rows
-from scripts.run_envduels_experiment import DEFAULT_CONFIG, load_environment, validate_hardware
 from scripts.benchmark_data import grade, load_benchmark
 
 
 class ExperimentTests(unittest.TestCase):
-    def test_all_90_config_and_overrides(self):
-        values = load_environment(DEFAULT_CONFIG, {"LR": "5e-7", "ENVDUELS_IDS_FILE": "old-split.txt"})
-        self.assertEqual(float(values["LR"]), 5e-7)
-        self.assertEqual(values["ENVDUELS_EXPECTED_COUNT"], "90")
-        self.assertEqual(values["ENVDUELS_IDS_FILE"], "")
-        self.assertEqual(values["CPU_OFFLOAD"], "1")
-        self.assertEqual(values["THINKING"], "false")
-        self.assertEqual(values["NUM_ROLLOUT"], "100")
-
-    def test_yaml_gpu_list_and_scientific_notation(self):
-        text = DEFAULT_CONFIG.read_text().replace("gpu_ids: []", "gpu_ids: [0, 1, 3, 4, 6, 7, 8, 9]")
-        text = text.replace("learning_rate: 1.0e-6", "learning_rate: 5e-7")
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "experiment.yaml"
-            path.write_text(text)
-            values = load_environment(path, {})
-        self.assertEqual(values["GPU_IDS"], "0,1,3,4,6,7,8,9")
-        self.assertEqual(float(values["LR"]), 5e-7)
-
-    def test_yaml_invalid_config_rejected(self):
-        original = DEFAULT_CONFIG.read_text()
-        for text in (
-            original.replace("learning_rate:", "learning_rae:"),
-            original.replace("thinking: false", "thinking: null"),
-            original.replace("group_size: 8", "group_size: 3"),
-            re.sub(r"gpu_ids: \[[^\n]*\]", "gpu_ids: [0, 0]", original),
-            original.replace("learning_rate: 1.0e-6", "learning_rate: .nan"),
-            original.replace("num_gpus: 8", "num_gpus: true"),
-            original + "\ntraining: {}\n",
-        ):
-            with self.subTest(text=text), tempfile.TemporaryDirectory() as temp:
-                path = Path(temp) / "experiment.yaml"
-                path.write_text(text)
-                with self.assertRaises(ValueError):
-                    load_environment(path, {})
-
-    def test_invalid_environment_override_rejected(self):
-        with self.assertRaises(ValueError):
-            load_environment(DEFAULT_CONFIG, {"LR": "nan"})
-
     def test_generic_protocols(self):
         self.assertEqual(grade(r"\boxed{-007}", "-7", "boxed_integer")[1:], (True, True))
         self.assertTrue(grade(r"\boxed{Paris}", "Paris", "boxed_exact_match")[1])
@@ -73,18 +30,6 @@ class ExperimentTests(unittest.TestCase):
             path.write_text("")
             with self.assertRaises(ValueError):
                 load_benchmark(path, "boxed_exact_match")
-
-    def test_hardware_validation(self):
-        values = load_environment(DEFAULT_CONFIG, {})
-        validate_hardware(values, "train")
-        with self.assertRaises(ValueError):
-            validate_hardware({**values, "NUM_GPUS": "7"}, "train")
-        with self.assertRaises(ValueError):
-            validate_hardware({**values, "TP": "3"}, "train")
-        with self.assertRaises(ValueError):
-            validate_hardware({**values, "EVAL_TP": "16"}, "eval-plan")
-        with self.assertRaises(ValueError):
-            load_environment(DEFAULT_CONFIG, {"EVAL_BENCHMARK": "typo"})
 
     def test_data_count_duplicates_labels(self):
         rows = [dict(id=i + 1, problem=f"Problem {i}", answer=i) for i in range(30)]

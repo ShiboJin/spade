@@ -79,6 +79,20 @@ class EnvDuelsTests(unittest.TestCase):
         repeat = self.adapter().create_instance(self.row["id"])
         self.assertEqual(first.metadata["seed"], repeat.metadata["seed"])
 
+    def test_explicit_seed_for_external_grpo_group(self):
+        adapter = self.adapter()
+        first = adapter.create_instance_with_seed(self.row["id"], 987)
+        second = adapter.create_instance_with_seed(self.row["id"], 987)
+        self.assertEqual(first.reset(), second.reset())
+        self.assertEqual(first.metadata["problem_id"], "author/env_001@seed=987")
+        first.step(r"\boxed{READ}")
+        self.assertEqual(second.env.env.turns, 0)
+        for seed in (-1, 2**63, True, "987"):
+            with self.subTest(seed=seed), self.assertRaises(ValueError):
+                adapter.create_instance_with_seed(self.row["id"], seed)
+        with self.assertRaisesRegex(ValueError, "Unknown"):
+            adapter.create_instance_with_seed("missing", 987)
+
     def test_parsing(self):
         self.assertEqual(extract_action(r'\boxed{READ} then \boxed{{"a": 1}}'), '{"a": 1}')
         self.assertIsNone(extract_action(r'\boxed{READ'))

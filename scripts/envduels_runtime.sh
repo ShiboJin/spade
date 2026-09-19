@@ -78,7 +78,7 @@ if [[ "$ACTION" == convert || "$ACTION" == smoke || "$ACTION" == train || "$ACTI
     if [[ -r /proc/driver/nvidia/version && "$IMAGE" == envduels-spade:qwen38-v1 ]]; then
         DRIVER_TEXT="$(</proc/driver/nvidia/version)"
         if [[ "$DRIVER_TEXT" == *' 555.'* ]]; then
-            echo 'Blocked: host driver 555 is outside this CUDA 12.9 image compatibility conditions. See cmd/games/ENVDUELS_RUN.md; do not bypass NVIDIA_REQUIRE_CUDA.' >&2
+            echo 'Blocked: host driver 555 is outside this CUDA 12.9 image compatibility conditions. Use cmd/games/UNIFIED_CU124_LORA.md instead; do not bypass NVIDIA_REQUIRE_CUDA.' >&2
             exit 2
         fi
     fi

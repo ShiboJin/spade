@@ -1,0 +1,10 @@
+.git
+.venv
+checkpoints
+outputs
+data
+slime
+tinker-cookbook
+runtime-cache
+**/__pycache__
+**/.git

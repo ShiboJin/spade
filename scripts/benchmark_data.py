@@ -3,7 +3,23 @@ import hashlib
 import json
 import re
 from scripts.prepare_aime26 import load_data as load_aime26
-from spade.core.envs.envduels_adapter import extract_action
+
+
+def extract_action(response):
+    """Read the final balanced box without importing the RL environment stack."""
+    marker = response.rfind("\\boxed{")
+    if marker < 0:
+        return None
+    start = marker + len("\\boxed{")
+    depth = 1
+    for index in range(start, len(response)):
+        if response[index] == "{":
+            depth += 1
+        elif response[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return response[start:index].strip() or None
+    return None
 
 BENCHMARKS = ("aime2026", "boxed_integer", "boxed_exact_match")
 

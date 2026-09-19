@@ -150,6 +150,19 @@ class EnvDuelsAdapter(EnvironmentAdapter):
     def create_instance(self, env_id, difficulty=0):
         return self._create(env_id, self.rng.randrange(2**63))
 
+    def create_instance_with_seed(self, env_id, seed):
+        """Create one reproducible instance for external rollout schedulers.
+
+        GRPO backends duplicate one dataset row ``num_generations`` times.  A
+        seed carried by that row therefore gives every member of the group the
+        same problem while keeping independent environment state.
+        """
+        if type(seed) is not int or not 0 <= seed < 2**63:
+            raise ValueError("EnvDuels seed must be an integer in [0, 2**63)")
+        if env_id not in self.rows:
+            raise ValueError(f"Unknown EnvDuels environment: {env_id}")
+        return self._create(env_id, seed)
+
     def create_instances_same_problem(self, env_id, difficulty=0, n=1):
         seed = self.rng.randrange(2**63)
         instances = []

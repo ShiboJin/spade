@@ -76,8 +76,9 @@ Its Qwen3.5 implementation explicitly forwards `output_gate_type` into the GDN
 norm. Runtime versions include PyTorch 2.11.0+cu129, Transformers 5.12.1,
 Megatron 0.16.0rc0 (the commit above), FLA 0.4.2 and mbridge 0.15.1
 (`89eb10887887bc74853f89a4de258c0702932a1c`). CPU model/bridge imports pass.
-The development venv remains separate. See ENVDUELS_RUN.md for the current
-555.42.02 host-driver blocker; this runtime is not yet GPU-certified.
+The development venv remains separate. See `cmd/games/UNIFIED_CU124_LORA.md`
+for the current CUDA 12.4 LoRA runtime; this older CUDA 12.9 stack is not
+GPU-certified on the 555.42.02 host driver.
 
 The checkpoint includes vision components and one MTP layer. Our intended
 workload is text-only. Conversion and rollout must explicitly agree about
