@@ -10,9 +10,14 @@ import math
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.memory_guard import (
+    DEFAULT_RESERVE_GIB, docker_memory_args, guarded_wait, launch_lock, preflight, validate_limits,
+)
 CONTAINER_ROOT = Path("/workspace/envduels/spade")
 CONTAINER_EXPORT = Path("/workspace/envduels/exports/duel_harness_004_rl")
 
@@ -28,11 +33,14 @@ FIELDS = {
     "ppo_clip_low", "ppo_clip_high", "seed",
     "lora_rank", "lora_alpha", "max_turns", "max_context_length",
     "actor_max_tokens", "enable_thinking", "preserve_thinking",
-    "vllm_tensor_parallel", "vllm_gpu_memory_utilization",
+    "vllm_tensor_parallel", "vllm_gpu_memory_utilization", "move_model_batches",
     "actor_temperature", "actor_top_p", "actor_top_k",
-    "overlong_filter", "rollout_json_export", "resume_from_checkpoint",
+    "overlong_filter", "rollout_json_export",
+    "wandb_enabled", "wandb_mode", "wandb_project", "wandb_entity",
+    "wandb_run_name", "resume_from_checkpoint",
     "save_every", "save_total_limit",
 }
+MEMORY_DEFAULTS = {"memory_limit_gib": 160, "host_memory_reserve_gib": DEFAULT_RESERVE_GIB}
 
 
 def write_json(path: Path, value) -> None:
@@ -64,12 +72,13 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
         raise ValueError("Config must contain exactly 'training' and 'accelerate' mappings")
     if not isinstance(document["training"], dict) or not isinstance(document["accelerate"], dict):
         raise ValueError("training and accelerate must be mappings")
-    cfg = dict(document["training"])
-    missing, unknown = FIELDS - cfg.keys(), cfg.keys() - FIELDS
+    cfg = {**MEMORY_DEFAULTS, **document["training"]}
+    missing, unknown = FIELDS - cfg.keys(), cfg.keys() - (FIELDS | MEMORY_DEFAULTS.keys())
     if missing:
         raise ValueError(f"Missing training settings: {sorted(missing)}")
     if unknown:
         raise ValueError(f"Unknown training settings: {sorted(unknown)}")
+    validate_limits(cfg["memory_limit_gib"], cfg["host_memory_reserve_gib"])
     if max_steps is not None and epochs is not None:
         raise ValueError("max_steps and epochs overrides are mutually exclusive")
     if max_steps is not None:
@@ -97,7 +106,7 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
         "batch_size", "per_device_train_batch_size", "num_substeps",
         "max_rollout_attempts", "lora_rank", "lora_alpha", "max_turns",
         "max_context_length", "actor_max_tokens", "vllm_tensor_parallel",
-        "actor_top_k", "save_every", "save_total_limit",
+        "actor_top_k", "save_every", "save_total_limit", "move_model_batches",
     )
     for key in positive_ints:
         if type(cfg[key]) is not int or cfg[key] < 1:
@@ -107,9 +116,17 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
     if type(cfg["fixed_pool_seed"]) is not int or not 0 <= cfg["fixed_pool_seed"] < 2**63:
         raise ValueError("fixed_pool_seed must be an integer in [0, 2**63)")
     for key in ("dataset_shuffle", "remove_constant_reward_groups", "enable_thinking",
-                "preserve_thinking", "overlong_filter", "rollout_json_export"):
+                "preserve_thinking", "overlong_filter", "rollout_json_export",
+                "wandb_enabled"):
         if type(cfg[key]) is not bool:
             raise ValueError(f"{key} must be a boolean")
+    if cfg["wandb_mode"] not in ("online", "offline"):
+        raise ValueError("wandb_mode must be online or offline")
+    if not isinstance(cfg["wandb_project"], str) or not cfg["wandb_project"].strip():
+        raise ValueError("wandb_project must be a nonempty string")
+    for key in ("wandb_entity", "wandb_run_name"):
+        if cfg[key] is not None and (not isinstance(cfg[key], str) or not cfg[key].strip()):
+            raise ValueError(f"{key} must be null or a nonempty string")
     if type(cfg["seed"]) is not int or not 0 <= cfg["seed"] < 2**32:
         raise ValueError("seed must be an integer in [0, 2**32)")
     for key in ("learning_rate", "warmup_ratio", "adam_beta1", "adam_beta2",
@@ -245,17 +262,23 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
 
 def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[str], Path]:
     checkpoint_dir = run_dir / "checkpoint"
+    online_wandb = cfg["wandb_enabled"] and cfg["wandb_mode"] == "online"
     command = [
         "docker", "run", "--rm", "--init", "--name", container_name,
         "--gpus", '"device=' + ",".join(map(str, cfg["gpu_ids"])) + '"',
-        "--network", "none", "--shm-size", "16g",
+        "--network", "bridge" if online_wandb else "none", "--shm-size", "16g",
         "--ulimit", "memlock=-1", "--ulimit", "stack=67108864",
         "--user", f"{os.getuid()}:{os.getgid()}",
         "--mount", f"type=bind,src={ROOT},dst={CONTAINER_ROOT}",
         "--mount", f"type=bind,src={cfg['export_dir']},dst={CONTAINER_EXPORT},readonly",
         "--workdir", str(CONTAINER_ROOT),
     ]
+    command += docker_memory_args(cfg["memory_limit_gib"])
     environment = {
+        # Numeric host UIDs need not exist in the image's /etc/passwd.
+        # Inductor calls getpass.getuser() even with TORCHINDUCTOR_CACHE_DIR set.
+        "USER": "envduels",
+        "SPADE_MEMORY_LIMIT_GIB": cfg["memory_limit_gib"],
         "NUM_GPUS": len(cfg["gpu_ids"]),
         "MODEL": container_path(cfg["model"]),
         "DATASET": container_path(cfg["dataset"]),
@@ -277,6 +300,7 @@ def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[
         "MAX_LENGTH": cfg["max_context_length"],
         "MAX_COMPLETION_LENGTH": cfg["actor_max_tokens"],
         "VLLM_TP": cfg["vllm_tensor_parallel"],
+        "MOVE_MODEL_BATCHES": cfg["move_model_batches"],
         "VLLM_GPU_MEMORY_UTILIZATION": cfg["vllm_gpu_memory_utilization"],
         "TEMPERATURE": cfg["actor_temperature"],
         "TOP_P": cfg["actor_top_p"],
@@ -298,14 +322,36 @@ def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[
         "LR_SCHEDULER_TYPE": cfg["lr_scheduler_type"],
         "SAVE_STEPS": cfg["save_every"],
         "SAVE_TOTAL_LIMIT": cfg["save_total_limit"],
+        "REPORT_TO": "tensorboard,wandb" if cfg["wandb_enabled"] else "tensorboard",
+        "RUN_NAME": cfg["wandb_run_name"] or container_name,
         "HF_HUB_OFFLINE": 1,
         "TRANSFORMERS_OFFLINE": 1,
         "HF_HOME": "/tmp/hf",
+        "HF_DATASETS_CACHE": "/tmp/hf/datasets",
+        "HUGGINGFACE_HUB_CACHE": "/tmp/hf/hub",
+        "MODELSCOPE_CACHE": "/tmp/modelscope",
         "XDG_CACHE_HOME": "/tmp/cache",
+        "XDG_CONFIG_HOME": "/tmp/config",
+        "VLLM_CACHE_ROOT": "/tmp/vllm",
+        "VLLM_CONFIG_ROOT": "/tmp/vllm-config",
+        "VLLM_NO_USAGE_STATS": 1,
+        "FLASHINFER_WORKSPACE_BASE": "/tmp/flashinfer",
+        "CUDA_CACHE_PATH": "/tmp/cuda",
         "TRITON_CACHE_DIR": "/tmp/triton",
         "TORCHINDUCTOR_CACHE_DIR": "/tmp/inductor",
         "PYTHONUNBUFFERED": 1,
     }
+    if cfg["wandb_enabled"]:
+        environment.update({
+            "WANDB_MODE": cfg["wandb_mode"],
+            "WANDB_PROJECT": cfg["wandb_project"],
+            "WANDB_DIR": container_path(run_dir / "wandb"),
+            "WANDB_LOG_MODEL": "false",
+            "WANDB_WATCH": "false",
+            "SPADE_RESOLVED_CONFIG": container_path(run_dir / "resolved_config.json"),
+        })
+        if cfg["wandb_entity"] is not None:
+            environment["WANDB_ENTITY"] = cfg["wandb_entity"]
     if cfg["max_steps"] is not None:
         environment["MAX_STEPS"] = cfg["max_steps"]
     else:
@@ -314,6 +360,9 @@ def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[
         environment["RESUME_FROM_CHECKPOINT"] = container_path(cfg["resume_from_checkpoint"])
     for key, value in environment.items():
         command += ["--env", f"{key}={value}"]
+    if online_wandb:
+        # Let Docker copy the host value without exposing the secret in launch.json.
+        command += ["--env", "WANDB_API_KEY"]
     command += [cfg["image"], "bash", "cmd/games/train_envduels_lora_swift.sh"]
     return command, checkpoint_dir
 
@@ -352,11 +401,21 @@ def main() -> None:
     if args.dry_run:
         print("Dry run only; no container started or GPU allocated.")
         return
+    if cfg["wandb_enabled"] and cfg["wandb_mode"] == "online" and not os.environ.get("WANDB_API_KEY"):
+        parser.error("online W&B requires WANDB_API_KEY in the host environment")
 
+    with launch_lock(ROOT / ".spade-memory.lock"):
+        preflight(cfg["memory_limit_gib"], cfg["host_memory_reserve_gib"])
+        run_training(cfg, run_dir, container_name, command, report)
+
+
+def run_training(cfg, run_dir, container_name, command, report):
     image_id = subprocess.check_output(
         ["docker", "image", "inspect", cfg["image"], "--format", "{{.Id}}"], text=True
     ).strip()
     run_dir.mkdir(parents=True, exist_ok=False)
+    if cfg["wandb_enabled"]:
+        (run_dir / "wandb").mkdir()
     write_json(run_dir / "accelerate_config.json", cfg["accelerate"])
     write_json(run_dir / "resolved_config.json", report)
     write_json(run_dir / "launch.json", {"image_id": image_id, "command": command})
@@ -367,15 +426,7 @@ def main() -> None:
             process = subprocess.Popen(
                 command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
             )
-            try:
-                code = process.wait()
-            except KeyboardInterrupt:
-                subprocess.run(
-                    ["docker", "stop", "--timeout", "30", container_name],
-                    check=False, timeout=45,
-                )
-                process.wait(timeout=45)
-                raise
+            code = guarded_wait(process, container_name, cfg["host_memory_reserve_gib"])
     except BaseException as exc:
         status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
         write_json(run_dir / "status.json", {"status": status, "error": str(exc)})

@@ -68,6 +68,9 @@ class EvaluationTests(unittest.TestCase):
     def test_external_paths_mounted_and_relative_paths_stable(self):
         cfg = self.config(checkpoint="/tmp/external model", data="/tmp/tests.jsonl")
         command = docker_command(cfg, Path("/tmp/eval output"), "test-evaluation")
+        self.assertEqual(command[command.index("--memory") + 1], "96g")
+        self.assertEqual(command[command.index("--memory-swap") + 1], "96g")
+        self.assertEqual(command[command.index("--memory-swappiness") + 1], "0")
         self.assertIn("type=bind,src=/tmp/external model,dst=/model,readonly", command)
         self.assertIn("type=bind,src=/tmp/tests.jsonl,dst=/dataset/test.jsonl,readonly", command)
         self.assertEqual(self.config()["checkpoint"], str(ROOT / "checkpoints/Qwen3.8-27B"))

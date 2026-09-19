@@ -1,0 +1,12 @@
+# Thin runtime-extras layer over the already-built CUDA/Torch/vLLM/ms-swift image.
+# Building it installs tracking and Qwen processor dependencies only; it never
+# recompiles the base runtime.
+ARG BASE_IMAGE=envduels-unified:cu124
+FROM ${BASE_IMAGE}
+
+ARG WANDB_VERSION=0.29.0
+ARG QWEN_VL_UTILS_VERSION=0.0.14
+RUN python3 -m pip install --no-cache-dir \
+      "wandb==${WANDB_VERSION}" \
+      "qwen-vl-utils[decord]==${QWEN_VL_UTILS_VERSION}" && \
+    python3 -c 'import av, decord, qwen_vl_utils, wandb; print("wandb", wandb.__version__)'

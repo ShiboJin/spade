@@ -1,6 +1,8 @@
 {
   "training": {
-    "image": "envduels-unified:cu124",
+    "image": "envduels-unified:cu124-wandb",
+    "memory_limit_gib": 160,
+    "host_memory_reserve_gib": 48,
     "gpu_ids": [0, 1, 2, 3, 4, 5, 6, 7],
     "model": "checkpoints/Qwen3.8-27B",
     "dataset": "data/envduels/fixed90-swift.jsonl",
@@ -8,11 +10,11 @@
     "output_dir": "outputs/training",
 
     "fixed_pool_seed": 42,
-    "fixed_pool_epochs": 1,
+    "fixed_pool_epochs": 3,
     "max_steps": null,
-    "num_games_per_rollout": 1,
-    "trajectories_per_game": 8,
-    "batch_size": 8,
+    "num_games_per_rollout": 6,
+    "trajectories_per_game": 4,
+    "batch_size": 24,
     "per_device_train_batch_size": 1,
     "num_substeps": 1,
     "dataset_shuffle": true,
@@ -41,7 +43,8 @@
     "enable_thinking": false,
     "preserve_thinking": true,
 
-    "vllm_tensor_parallel": 4,
+    "vllm_tensor_parallel": 8,
+    "move_model_batches": 64,
     "vllm_gpu_memory_utilization": 0.45,
     "actor_temperature": 0.6,
     "actor_top_p": 0.95,
@@ -49,8 +52,14 @@
     "overlong_filter": true,
     "rollout_json_export": true,
 
+    "wandb_enabled": true,
+    "wandb_mode": "online",
+    "wandb_project": "envduels",
+    "wandb_entity": null,
+    "wandb_run_name": "qwen38-27b-lora-grpo-v1",
+
     "resume_from_checkpoint": null,
-    "save_every": 1,
+    "save_every": 5,
     "save_total_limit": 3
   },
   "accelerate": {

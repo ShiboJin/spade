@@ -21,6 +21,10 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.benchmark_data import grade
+from scripts.memory_guard import (
+    DEFAULT_RESERVE_GIB, docker_memory_args, guarded_wait, launch_lock, preflight,
+    validate_limits, verify_container_limits,
+)
 
 DEFAULTS = dict(
     output_dir="outputs/evaluation", benchmark="boxed_integer", prompt_key="problem",
@@ -33,6 +37,7 @@ DEFAULTS = dict(
     max_num_seqs=16, max_num_batched_tokens=4096, enforce_eager=True,
     limit_mm_per_prompt={}, max_concurrent_problems=1,
     request_timeout_seconds=1800, startup_timeout_seconds=1200, lora=None,
+    memory_limit_gib=96, host_memory_reserve_gib=DEFAULT_RESERVE_GIB,
 )
 
 
@@ -56,6 +61,7 @@ def load_config(path, overrides=None):
         raise ValueError(f"Unknown evaluation settings: {sorted(unknown)}")
     cfg = {**DEFAULTS, **supplied}
     cfg.update(overrides or {})
+    validate_limits(cfg["memory_limit_gib"], cfg["host_memory_reserve_gib"])
     for key in ("checkpoint", "data", "output_dir", "image", "prompt_key", "answer_key"):
         if not isinstance(cfg.get(key), str) or not cfg[key].strip():
             raise ValueError(f"{key} must be a nonempty string")
@@ -287,6 +293,7 @@ def docker_command(cfg, out, name):
     command = ["docker", "run", "--rm", "--init", "--name", name,
                "--gpus", '"device=' + ','.join(map(str, cfg["gpu_ids"])) + '"',
                "--network", "none", "--shm-size", "16g", "--user", f"{os.getuid()}:{os.getgid()}"]
+    command += docker_memory_args(cfg["memory_limit_gib"])
     for source, target, readonly in mounts:
         if "," in str(source):
             raise ValueError("Docker mount paths must not contain commas")
@@ -320,6 +327,7 @@ def main():
                       ("checkpoint", "data", "output_dir", "max_problems", "samples_per_problem", "image", "lora")
                       if getattr(args, k) is not None})
     if args.inside_container:
+        verify_container_limits(cfg["memory_limit_gib"])
         evaluate(cfg, Path(cfg["output_dir"]))
         return
     checkpoint = Path(cfg["checkpoint"])
@@ -344,6 +352,12 @@ def main():
     if args.dry_run:
         print("Dry run only; no container started or GPU allocated.")
         return
+    with launch_lock(ROOT / ".spade-memory.lock"):
+        preflight(cfg["memory_limit_gib"], cfg["host_memory_reserve_gib"])
+        run_evaluation(cfg, out, name, command, report, checkpoint)
+
+
+def run_evaluation(cfg, out, name, command, report, checkpoint):
     image_id = subprocess.check_output(["docker", "image", "inspect", cfg["image"], "--format", "{{.Id}}"], text=True).strip()
     out.mkdir(parents=True, exist_ok=False)
     write_json(out / "resolved_config.json", report)
@@ -361,12 +375,7 @@ def main():
     try:
         with (out / "console.log").open("w") as log:
             proc = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-            try:
-                code = proc.wait()
-            except KeyboardInterrupt:
-                subprocess.run(["docker", "stop", "--time", "30", name], check=False, timeout=45)
-                proc.wait(timeout=45)
-                raise
+            code = guarded_wait(proc, name, cfg["host_memory_reserve_gib"])
     except BaseException as exc:
         write_json(out / "status.json", dict(status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed", error=str(exc)))
         raise

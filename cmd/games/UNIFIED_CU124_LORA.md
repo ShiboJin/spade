@@ -4,6 +4,26 @@ This runtime trains Qwen3.8-27B on the 90 fixed EnvDuels environments with
 ms-swift LoRA GRPO, FSDP2 and colocated vLLM. The same Docker image also runs
 base-model and PEFT-adapter AIME evaluation.
 
+A Chinese field-by-field guide is available in `cmd/games/TRAIN_CONFIG_CN.md`.
+
+The training launcher caps total container RAM at 160 GiB and requires another
+48 GiB of available host RAM before starting. Evaluation defaults to a 96 GiB
+cap with the same reserve. Both launchers verify kernel-enforced limits before
+model loading, serialize runs in this checkout, and stop their own container
+if host available memory falls below half the reserve. On this cgroup-v1 host,
+swap accounting is unavailable, so `memory.swappiness=0` is also enforced and
+checked. See the Chinese guide's memory-protection section for scope and limits.
+
+The pinned Transformers loader patch prevents both checkpoint reads and the
+subsequent full-parameter zero-fill on nonzero FSDP ranks. The zero-fill alone
+previously exhausted host memory despite skipping worker checkpoint reads.
+
+The numeric-UID container sets `USER=envduels` and writable configuration/cache
+paths so Inductor and vLLM can initialize without a passwd entry. Rollouts use
+TP=8: TP=4 leaves insufficient space for KV cache at the configured 0.45 GPU
+memory budget. `move_model_batches=64` transfers decoder weights one layer at
+a time, avoiding a full 27B all-gather on every GPU when synchronizing to vLLM.
+
 The runtime bind-mounts source code, configs, datasets, checkpoints and output
 directories from the host. Editing those files or replacing the 90-environment
 export does not require rebuilding the image. Rebuild only after changing a
@@ -17,14 +37,16 @@ The checked-in training config expresses this exact experiment:
 ```text
 fixed environments                         90
 fixed instances (seeds) per environment     1
-environments in each rollout/update batch   1
-independent trajectories per environment    8
-GRPO group size                              8
-rollout episodes per batch                   8
-fixed-pool epochs                            1
-optimizer steps per fixed-pool epoch        90
-episodes per fixed-pool epoch              720
-episodes per environment in the whole run    8
+environments in each rollout/update batch   6
+independent trajectories per environment    4
+GRPO group size                              4
+rollout episodes per batch                  24
+fixed-pool epochs                            3
+optimizer steps per fixed-pool epoch        15
+episodes per fixed-pool epoch              360
+episodes per environment in the whole run   12
+optimizer steps in the whole run            45
+episodes in the whole run                 1080
 ```
 
 Each environment needs one deterministic integer seed to make reset
@@ -35,16 +57,15 @@ The important config relationship is:
 
 ```text
 batch_size = num_games_per_rollout * trajectories_per_game
-           = 1 * 8
-           = 8
+           = 6 * 4
+           = 24
 ```
 
-`num_games_per_rollout: 1` is the conservative 8x4090 starting point. One
-complete eight-sample GRPO group is generated and updated at a time. It also
-divides the 90-item fixed pool exactly. If it is later increased, it must divide
-90 and `batch_size` must be changed with it. For example, 5 games and 8
-trajectories means a rollout batch of 40 episodes and substantially higher
-rollout memory demand.
+`num_games_per_rollout: 6` preserves complete four-sample GRPO groups, divides
+the 90-item fixed pool, and produces a 24-sample generation batch. On eight
+GPUs, the global micro-batch is eight, so the launcher derives gradient
+accumulation of three. If either rollout dimension changes, `batch_size` must
+change with it and remain divisible by the global micro-batch.
 
 ## How the original SPADE rollout maps to this run
 
@@ -66,15 +87,15 @@ overprovisioned and only complete same-problem groups are retained.
 Our ms-swift path preserves the relevant actor-only behavior:
 
 1. One JSONL row selects one fixed environment and its deterministic reset.
-2. ms-swift expands the row into eight independent Gym environment objects.
-3. The eight actors play the same problem for at most 25 turns.
+2. ms-swift expands the row into four independent Gym environment objects.
+3. The four actors play the same problem for at most 25 turns.
 4. Each episode receives the EnvDuels terminal reward, currently binary 0/1.
-5. `grpo_no_std` subtracts the eight-reward group mean without dividing by the
+5. `grpo_no_std` subtracts the four-reward group mean without dividing by the
    group standard deviation.
 6. The PPO-style clipped GRPO loss uses low/high clips 0.20/0.28 and updates
    only rank-32 LoRA parameters.
 
-When all eight rewards are equal, all eight advantages are zero. Because
+When all four rewards are equal, all four advantages are zero. Because
 `remove_constant_reward_groups` is false, the group is kept and contributes
 zero policy-gradient signal instead of being resampled.
 
@@ -126,9 +147,10 @@ python3 scripts/run_train.py \
   --smoke
 ```
 
-This loads the BF16 base model, creates LoRA, generates one eight-trajectory
-group, runs backward and one optimizer update, synchronizes the adapter to
-vLLM, and saves a PEFT checkpoint. It is the smallest end-to-end GPU test.
+This loads the BF16 base model, creates LoRA, generates six four-trajectory
+groups, accumulates three micro-batches, runs one optimizer update, synchronizes
+the adapter to vLLM, and saves a PEFT checkpoint. It is the smallest end-to-end
+GPU test for the configured batch shape.
 
 ## Run the configured training experiment
 
@@ -137,16 +159,17 @@ python3 scripts/run_train.py \
   --config configs/train_qwen38_envduels_lora.json
 ```
 
-The default is exactly one fixed-pool epoch: each of the 90 environments gets
-eight rollouts once. To repeat the same fixed pool three times temporarily:
+The default is three fixed-pool epochs. Each of the 90 environments gets four
+rollouts in each epoch, for 12 rollouts per environment in the whole run. To
+run two epochs temporarily, which gives exactly eight rollouts per environment:
 
 ```bash
 python3 scripts/run_train.py \
   --config configs/train_qwen38_envduels_lora.json \
-  --epochs 3
+  --epochs 2
 ```
 
-That override produces 270 optimizer steps, 2160 episodes and 24 episodes per
+That override produces 30 optimizer steps, 720 episodes and eight episodes per
 environment. An explicit update cap is also available:
 
 ```bash
@@ -195,17 +218,68 @@ smoke test and memory/latency measurements.
 
 ## Docker image
 
-Build, if the local image does not already exist:
+Build the base image if it does not already exist:
 
 ```bash
 BUILD_JOBS=64 bash scripts/unified_runtime.sh build
 ```
 
-The image is `envduels-unified:cu124`. Its Dockerfile pins CUDA 12.4.1, Torch,
-vLLM and ms-swift. Torch and vLLM were built for SM80 and SM89, covering A100
-and RTX 4090. The image has completed CPU/import checks, and Qwen3.8-27B has
-loaded and generated a token with TP=4 on RTX 4090. The eight-GPU optimizer-step
-smoke remains the final validation when all eight GPUs are idle.
+Then add the small W&B-only layer used by the checked-in training config:
+
+```bash
+bash scripts/unified_runtime.sh build-wandb
+```
+
+The base image is `envduels-unified:cu124`; the thin tracking image is
+`envduels-unified:cu124-wandb`. The second command reuses the already-built base
+image and only installs the Python W&B and Qwen processor runtime packages. It
+does not rebuild CUDA, Torch, vLLM or ms-swift.
+
+The base Dockerfile pins CUDA 12.4.1, Torch, vLLM and ms-swift. Torch and vLLM
+were built for SM80 and SM89, covering A100 and RTX 4090. The image has
+completed CPU/import checks, and Qwen3.8-27B has loaded and generated a token
+with TP=4 on RTX 4090. The eight-GPU optimizer-step smoke remains the final
+validation when all eight GPUs are idle.
+
+FSDP2 is configured in both the Accelerate launcher configuration and
+`configs/ms_swift_fsdp2.json`. The latter is passed explicitly to ms-swift so
+its pre-Trainer model-loading phase enables rank-0-only weight loading. Native
+FSDP activation checkpointing is used instead of generic gradient
+checkpointing.
+
+## W&B tracking
+
+The default config sends metrics to both TensorBoard and W&B. W&B receives the
+Trainer and GRPO metrics (including loss, reward, learning rate, gradient norm,
+completion length, KL/clipping metrics when emitted by ms-swift) and completion
+tables because `rollout_json_export` is enabled. The complete resolved launcher
+configuration, including fixed-pool settings and derived batch/step counts, is
+stored under the W&B config key `experiment`. Model checkpoints are not uploaded
+to W&B.
+
+Before an online run, provide the key in the host environment. The launcher
+passes the variable name to Docker without serializing its value into
+`launch.json` or `resolved_config.json`:
+
+```bash
+read -rsp 'W&B API key: ' WANDB_API_KEY
+export WANDB_API_KEY
+echo
+python3 scripts/run_train.py \
+  --config configs/train_qwen38_envduels_lora.json \
+  --smoke
+```
+
+The project is selected by `wandb_project`. Set `wandb_entity` in the JSON only
+when the run should belong to a particular team. A null `wandb_run_name` uses
+the launcher's unique UTC run name. Online W&B uses Docker's bridge network;
+Hugging Face model and dataset access remains offline.
+
+For a network-isolated run, set `wandb_mode` to `offline`. The launcher then
+keeps `--network none`, writes the W&B run beneath the timestamped output
+directory, and does not require `WANDB_API_KEY`. Upload it later with
+`wandb sync` from a networked environment. Set `wandb_enabled` to false to keep
+TensorBoard only.
 
 ## Evaluate base and LoRA checkpoints
 
