@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.run_train import ROOT, docker_command, load_config
+from scripts.run_train import ROOT, ROLLOUT_DEFAULTS, docker_command, load_config
 
 
 class TrainingLauncherTests(unittest.TestCase):
@@ -28,6 +28,9 @@ class TrainingLauncherTests(unittest.TestCase):
         self.assertIn("NUM_GPUS=8", command)
         self.assertIn("VLLM_TP=8", command)
         self.assertIn("MOVE_MODEL_BATCHES=64", command)
+        for value in ("VLLM_ENFORCE_EAGER=true", "SLEEP_LEVEL=2",
+                      "OFFLOAD_MODEL=true", "OFFLOAD_OPTIMIZER=true"):
+            self.assertIn(value, command)
         self.assertNotIn("MAX_STEPS=100", command)
         self.assertIn("NUM_TRAIN_EPOCHS=3", command)
         self.assertIn("GENERATION_BATCH_SIZE=24", command)
@@ -102,6 +105,13 @@ class TrainingLauncherTests(unittest.TestCase):
             {"gpu_ids": [0, 0]},
             {"vllm_tensor_parallel": 3},
             {"move_model_batches": 0},
+            {"vllm_enforce_eager": "false"},
+            {"offload_model": 0},
+            {"offload_optimizer": "false"},
+            {"sleep_level": True},
+            {"sleep_level": -1},
+            {"sleep_level": 3},
+            {"sleep_level": 1.0},
             {"max_context_length": 8192, "actor_max_tokens": 8192},
             {"grpo_logps_chunk_size": 0},
             {"grpo_chunked_logps": "true"},
@@ -141,6 +151,23 @@ class TrainingLauncherTests(unittest.TestCase):
         self.assertIn("SPADE_GRPO_DECODER_CHECKPOINTING=false", command)
         self.assertIn("SPADE_GRPO_CPU_ACTIVATION_OFFLOAD=false", command)
         self.assertIn("SPADE_GRPO_CHECKPOINT_DELTA_RULE=false", command)
+        for value in ("SPADE_GRPO_LOGPS_CHUNK_SIZE=512", "MOVE_MODEL_BATCHES=32",
+                      "VLLM_ENFORCE_EAGER=false", "SLEEP_LEVEL=1",
+                      "OFFLOAD_MODEL=false", "OFFLOAD_OPTIMIZER=false"):
+            self.assertIn(value, command)
+
+    def test_legacy_rollout_defaults_and_zero_sleep(self):
+        document = json.loads((ROOT / "configs/train_qwen38_envduels_lora.json").read_text())
+        for key in ROLLOUT_DEFAULTS:
+            document["training"].pop(key)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "training.json"
+            path.write_text(json.dumps(document))
+            cfg = load_config(path)
+        for key, value in ROLLOUT_DEFAULTS.items():
+            self.assertEqual(cfg[key], value)
+        command, _ = docker_command(self.config(sleep_level=0), ROOT / "outputs/training/test-zero", "test-zero")
+        self.assertIn("SLEEP_LEVEL=0", command)
 
     def test_ms_swift_fsdp_config_matches_accelerate(self):
         document = json.loads((ROOT / "configs/train_qwen38_envduels_lora.json").read_text())
@@ -170,6 +197,10 @@ class TrainingLauncherTests(unittest.TestCase):
         self.assertIn('--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT"', script)
         self.assertIn('--fsdp "$FSDP_CONFIG"', script)
         self.assertIn('--move_model_batches "$MOVE_MODEL_BATCHES"', script)
+        for flag, env in (("vllm_enforce_eager", "VLLM_ENFORCE_EAGER"),
+                          ("sleep_level", "SLEEP_LEVEL"), ("offload_model", "OFFLOAD_MODEL"),
+                          ("offload_optimizer", "OFFLOAD_OPTIMIZER")):
+            self.assertIn(f'--{flag} "${env}"', script)
         self.assertIn("spade/swift_backend/fsdp_ram_loader.py", script)
         self.assertNotIn("--gradient_checkpointing true", script)
 

@@ -31,6 +31,10 @@ MAX_TURNS="${MAX_TURNS:-25}"
 MAX_LENGTH="${MAX_LENGTH:-8192}"
 MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-1024}"
 VLLM_TP="${VLLM_TP:-8}"
+VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-true}"
+SLEEP_LEVEL="${SLEEP_LEVEL:-2}"
+OFFLOAD_MODEL="${OFFLOAD_MODEL:-true}"
+OFFLOAD_OPTIMIZER="${OFFLOAD_OPTIMIZER:-true}"
 MOVE_MODEL_BATCHES="${MOVE_MODEL_BATCHES:-64}"
 LORA_RANK="${LORA_RANK:-32}"
 LORA_ALPHA="${LORA_ALPHA:-64}"
@@ -42,7 +46,8 @@ for name in NUM_GPUS NUM_GENERATIONS PER_DEVICE_TRAIN_BATCH_SIZE GRADIENT_ACCUMU
     [[ "$value" =~ ^[1-9][0-9]*$ ]] || { echo "$name must be a positive integer" >&2; exit 2; }
 done
 [[ "$DATASET_SHUFFLE" == true || "$DATASET_SHUFFLE" == false ]] || { echo 'DATASET_SHUFFLE must be true or false' >&2; exit 2; }
-for name in ENABLE_THINKING PRESERVE_THINKING DYNAMIC_SAMPLE OVERLONG_FILTER LOG_COMPLETIONS; do
+[[ "$SLEEP_LEVEL" =~ ^[012]$ ]] || { echo 'SLEEP_LEVEL must be 0, 1 or 2' >&2; exit 2; }
+for name in ENABLE_THINKING PRESERVE_THINKING DYNAMIC_SAMPLE OVERLONG_FILTER LOG_COMPLETIONS VLLM_ENFORCE_EAGER OFFLOAD_MODEL OFFLOAD_OPTIMIZER; do
     value="${!name}"
     [[ "$value" == true || "$value" == false ]] || { echo "$name must be true or false" >&2; exit 2; }
 done
@@ -111,7 +116,7 @@ exec accelerate launch \
     --move_model_batches "$MOVE_MODEL_BATCHES" \
     --vllm_gpu_memory_utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.45}" \
     --vllm_max_model_len "$MAX_LENGTH" \
-    --vllm_enforce_eager true \
+    --vllm_enforce_eager "$VLLM_ENFORCE_EAGER" \
     --enable_thinking "$ENABLE_THINKING" \
     --preserve_thinking "$PRESERVE_THINKING" \
     --max_length "$MAX_LENGTH" \
@@ -142,9 +147,9 @@ exec accelerate launch \
     --dynamic_sample "$DYNAMIC_SAMPLE" \
     --max_resample_times "${MAX_RESAMPLE_TIMES:-3}" \
     --overlong_filter "$OVERLONG_FILTER" \
-    --sleep_level 2 \
-    --offload_model true \
-    --offload_optimizer true \
+    --sleep_level "$SLEEP_LEVEL" \
+    --offload_model "$OFFLOAD_MODEL" \
+    --offload_optimizer "$OFFLOAD_OPTIMIZER" \
     --log_completions "$LOG_COMPLETIONS" \
     --report_to "${REPORT_TO_ARGS[@]}" \
     --run_name "$RUN_NAME" \

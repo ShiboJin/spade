@@ -17,19 +17,30 @@ Both profiles retain 16K context, 24 turns, TP=8, a batch of 24 trajectories and
 three gradient accumulation microbatches. They save every five optimizer steps.
 The A100 profile has not been benchmarked or validated on A100 hardware. It
 retains ordinary FSDP activation checkpointing and disables the additional
-low-memory decoder and gated-delta recomputation paths. It does not change the
-rollout model/optimizer offloading settings or assume a particular GPU topology.
+low-memory decoder and gated-delta recomputation paths. It disables enforced
+eager rollout and training model/optimizer offloading, uses vLLM sleep level 1,
+and increases the logps chunk size to 512. These are starting settings for an
+A100 smoke run, not measured throughput improvements or an OOM-free guarantee.
+Sleep level 1 still allows vLLM to offload its weights while sleeping; disabling
+`offload_model` does not disable that separate vLLM mechanism.
 
 | Training setting | Low-memory default | A100 profile | Plugin environment |
 | --- | --- | --- | --- |
 | `grpo_chunked_logps` | `true` | `true` | `SPADE_GRPO_CHUNKED_LOGPS` |
-| `grpo_logps_chunk_size` | `128` | `128` | `SPADE_GRPO_LOGPS_CHUNK_SIZE` |
+| `grpo_logps_chunk_size` | `128` | `512` | `SPADE_GRPO_LOGPS_CHUNK_SIZE` |
 | `grpo_decoder_checkpointing` | `true` | `false` | `SPADE_GRPO_DECODER_CHECKPOINTING` |
 | `grpo_cpu_activation_offload` | `true` | `false` | `SPADE_GRPO_CPU_ACTIVATION_OFFLOAD` |
 | `grpo_checkpoint_delta_rule` | `true` | `false` | `SPADE_GRPO_CHECKPOINT_DELTA_RULE` |
+| `vllm_enforce_eager` | `true` | `false` | `VLLM_ENFORCE_EAGER` |
+| `sleep_level` | `2` | `1` | `SLEEP_LEVEL` |
+| `offload_model` | `true` | `false` | `OFFLOAD_MODEL` |
+| `offload_optimizer` | `true` | `false` | `OFFLOAD_OPTIMIZER` |
+| `move_model_batches` | `64` | `32` | `MOVE_MODEL_BATCHES` |
 
-These JSON settings are optional for backward compatibility; omitted settings
-use the low-memory defaults. The launcher validates and passes them into Docker.
+The GRPO and four rollout switch settings are optional for backward compatibility;
+omitted settings use the low-memory defaults. `move_model_batches` remains required.
+The launcher validates and passes them into Docker. `sleep_level` accepts integers
+0, 1 and 2; the eager/offload switches require JSON booleans.
 CPU activation offload requires decoder checkpointing. Gated-delta recomputation
 only wraps the Transformers PyTorch fallback, not an installed native FLA kernel.
 GPU capacity alone does not change which attention implementation is installed.

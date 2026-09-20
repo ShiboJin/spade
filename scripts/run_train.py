@@ -41,6 +41,12 @@ FIELDS = {
     "save_every", "save_total_limit",
 }
 MEMORY_DEFAULTS = {"memory_limit_gib": 160, "host_memory_reserve_gib": DEFAULT_RESERVE_GIB}
+ROLLOUT_DEFAULTS = {
+    "vllm_enforce_eager": True,
+    "sleep_level": 2,
+    "offload_model": True,
+    "offload_optimizer": True,
+}
 # Preserve the validated low-memory behavior for existing configuration files.
 GRPO_MEMORY_DEFAULTS = {
     "grpo_chunked_logps": True,
@@ -80,9 +86,9 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
         raise ValueError("Config must contain exactly 'training' and 'accelerate' mappings")
     if not isinstance(document["training"], dict) or not isinstance(document["accelerate"], dict):
         raise ValueError("training and accelerate must be mappings")
-    cfg = {**MEMORY_DEFAULTS, **GRPO_MEMORY_DEFAULTS, **document["training"]}
+    cfg = {**MEMORY_DEFAULTS, **GRPO_MEMORY_DEFAULTS, **ROLLOUT_DEFAULTS, **document["training"]}
     missing = FIELDS - cfg.keys()
-    unknown = cfg.keys() - (FIELDS | MEMORY_DEFAULTS.keys() | GRPO_MEMORY_DEFAULTS.keys())
+    unknown = cfg.keys() - (FIELDS | MEMORY_DEFAULTS.keys() | GRPO_MEMORY_DEFAULTS.keys() | ROLLOUT_DEFAULTS.keys())
     if missing:
         raise ValueError(f"Missing training settings: {sorted(missing)}")
     if unknown:
@@ -127,9 +133,12 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
     for key in ("dataset_shuffle", "remove_constant_reward_groups", "enable_thinking",
                 "preserve_thinking", "overlong_filter", "rollout_json_export",
                 "wandb_enabled", "grpo_chunked_logps", "grpo_decoder_checkpointing",
-                "grpo_cpu_activation_offload", "grpo_checkpoint_delta_rule"):
+                "grpo_cpu_activation_offload", "grpo_checkpoint_delta_rule",
+                "vllm_enforce_eager", "offload_model", "offload_optimizer"):
         if type(cfg[key]) is not bool:
             raise ValueError(f"{key} must be a boolean")
+    if type(cfg["sleep_level"]) is not int or cfg["sleep_level"] not in (0, 1, 2):
+        raise ValueError("sleep_level must be an integer in {0, 1, 2}")
     if cfg["grpo_cpu_activation_offload"] and not cfg["grpo_decoder_checkpointing"]:
         raise ValueError("grpo_cpu_activation_offload requires grpo_decoder_checkpointing")
     if cfg["wandb_mode"] not in ("online", "offline"):
@@ -317,6 +326,10 @@ def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[
         "MAX_LENGTH": cfg["max_context_length"],
         "MAX_COMPLETION_LENGTH": cfg["actor_max_tokens"],
         "VLLM_TP": cfg["vllm_tensor_parallel"],
+        "VLLM_ENFORCE_EAGER": str(cfg["vllm_enforce_eager"]).lower(),
+        "SLEEP_LEVEL": cfg["sleep_level"],
+        "OFFLOAD_MODEL": str(cfg["offload_model"]).lower(),
+        "OFFLOAD_OPTIMIZER": str(cfg["offload_optimizer"]).lower(),
         "MOVE_MODEL_BATCHES": cfg["move_model_batches"],
         "VLLM_GPU_MEMORY_UTILIZATION": cfg["vllm_gpu_memory_utilization"],
         "TEMPERATURE": cfg["actor_temperature"],

@@ -51,6 +51,10 @@
 
     "vllm_tensor_parallel": 8,
     "move_model_batches": 64,
+    "vllm_enforce_eager": true,
+    "sleep_level": 2,
+    "offload_model": true,
+    "offload_optimizer": true,
     "vllm_gpu_memory_utilization": 0.45,
     "actor_temperature": 0.6,
     "actor_top_p": 0.95,
