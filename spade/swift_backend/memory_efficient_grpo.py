@@ -10,6 +10,7 @@ from accelerate.utils import is_peft_model
 import torch
 from torch.utils.checkpoint import checkpoint
 from swift.rlhf_trainers.grpo_trainer import GRPOTrainer
+from swift.rlhf_trainers.utils import _ForwardRedirection
 from swift.utils import get_logger
 from torch import nn
 
@@ -118,6 +119,9 @@ def install_chunked_grpo_logps(*, chunk_size=128):
     original = GRPOTrainer._get_logps_via_local_forward
     if getattr(original, "_spade_chunked_logps", False):
         return
+    # Swift initializes trainer._forward_redirection only for Liger loss.
+    # The chunked path needs the same FSDP hooks independently of that option.
+    forward_redirection = _ForwardRedirection()
 
     def get_logps(self, model, model_inputs, logits_to_keep, input_ids, compute_entropy=False):
         unwrapped = self.accelerator.unwrap_model(model)
@@ -141,9 +145,9 @@ def install_chunked_grpo_logps(*, chunk_size=128):
 
             # Accelerate may shard the frozen head separately from the root.
             # Enter its forward hooks before reading its (unsharded) weights.
-            return self._forward_redirection(head, head, project, hidden)
+            return forward_redirection(head, head, project, hidden)
 
-        return self._forward_redirection(model, unwrapped, forward, **inputs)
+        return forward_redirection(model, unwrapped, forward, **inputs)
 
     get_logps._spade_chunked_logps = True
     GRPOTrainer._get_logps_via_local_forward = get_logps

@@ -44,7 +44,6 @@ def main():
         from transformers.utils.logging import disable_progress_bar
         from spade.swift_backend import fsdp_ram_loader  # noqa: F401
         from spade.swift_backend.memory_efficient_grpo import GRPOTrainer
-        from swift.rlhf_trainers.utils import _ForwardRedirection
 
         disable_progress_bar()
         accelerator = Accelerator(mixed_precision="bf16", gradient_accumulation_steps=args.microbatches,
@@ -76,8 +75,7 @@ def main():
         reserve_bytes = int((args.reserve_gib + (args.rank0_extra_reserve_gib if dist.get_rank() == 0 else 0)) * 1024**3)
         reserve = torch.empty(reserve_bytes, dtype=torch.uint8, device=accelerator.device)
         trainer = SimpleNamespace(accelerator=accelerator, args=SimpleNamespace(report_to=[]),
-            is_multimodal=True, model_kwarg_keys={"use_cache", "logits_to_keep"}, temperature=0.6,
-            _forward_redirection=_ForwardRedirection())
+            is_multimodal=True, model_kwarg_keys={"use_cache", "logits_to_keep"}, temperature=0.6)
         trainer._get_last_hidden_state = MethodType(GRPOTrainer._get_last_hidden_state, trainer)
         tokens = torch.randint(100, 10000, (1, args.length), device=accelerator.device)
         inputs = {"input_ids": tokens, "attention_mask": torch.ones_like(tokens), "use_cache": False}

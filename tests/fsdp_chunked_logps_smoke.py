@@ -18,7 +18,6 @@ def main():
         from transformers import Qwen3_5Config, Qwen3_5ForConditionalGeneration
         from trl.trainer.utils import selective_log_softmax
         from spade.swift_backend.memory_efficient_grpo import GRPOTrainer, checkpoint_decoder_layers
-        from swift.rlhf_trainers.utils import _ForwardRedirection
 
         torch.manual_seed(42)
         config = Qwen3_5Config(
@@ -49,8 +48,9 @@ def main():
         trainer = SimpleNamespace(
             accelerator=SimpleNamespace(unwrap_model=lambda m: m, is_main_process=dist.get_rank() == 0),
             args=SimpleNamespace(report_to=[]), is_multimodal=True,
-            model_kwarg_keys={"use_cache", "logits_to_keep"}, temperature=0.6,
-            _forward_redirection=_ForwardRedirection())
+            model_kwarg_keys={"use_cache", "logits_to_keep"}, temperature=0.6)
+        # Match non-Liger trainers: Swift does not initialize this attribute.
+        assert not hasattr(trainer, "_forward_redirection")
         trainer._get_last_hidden_state = MethodType(GRPOTrainer._get_last_hidden_state, trainer)
         tokens = torch.randint(1, 97, (2, 529), device="cuda")
         mask = torch.ones_like(tokens)
