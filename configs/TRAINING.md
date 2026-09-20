@@ -83,3 +83,24 @@ enables `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. The pinned vLLM buil
 temporarily disables expandable segments within its sleep memory pool; recheck
 this compatibility if replacing the image. Early binding is a precaution, not
 proof that all secondary GPU0 contexts have been eliminated.
+
+When SPADE decoder checkpointing is enabled, a root pre-forward hook disables
+HF checkpointing only on the decoder layers already managed by SPADE. Swift can
+otherwise re-enable an outer reentrant checkpoint after FSDP setup, retaining
+the layer inputs on GPU and bypassing SPADE's CPU offload on the initial forward.
+The A100 profile, which does not install SPADE decoder checkpointing, is unaffected.
+
+For a stronger check without game rollout, the existing real-model test can
+simulate Swift re-enabling checkpointing and add explicit GPU memory pressure:
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+torchrun --standalone --nproc_per_node=8 tests/qwen_grpo_memory_smoke.py \
+  --length 16384 --microbatches 1 --reserve-gib 2 --rank0-extra-reserve-gib 0 \
+  --reentrant-checkpoint --output outputs/oom_validation/qwen16k_checkpoint_guard.json
+```
+
+Run this in a training container with the required 160 GiB host-memory limit.
+It loads real weights and checks old logps, training forward/backward, and one
+optimizer update. The synthetic reserve does not reproduce vLLM's allocator
+history, so this still does not replace an end-to-end run.

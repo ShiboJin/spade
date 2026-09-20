@@ -74,8 +74,13 @@ def main():
                           for name, p in model.named_parameters() if p.requires_grad}
         model.zero_grad(set_to_none=True)
         checkpoint_decoder_layers(model)
+        if args.reentrant_checkpoint:
+            # Swift can re-enable HF checkpointing after our FSDP setup.
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
+            assert all(layer.gradient_checkpointing for layer in layers)
         torch.manual_seed(91)
         actual, _ = GRPOTrainer._get_logps_via_local_forward(trainer, model, inputs, keep, tokens)
+        assert all(not layer.gradient_checkpointing for layer in layers)
         torch.testing.assert_close(actual, reference.detach(), rtol=2e-5, atol=2e-5)
         (actual * scale).mean().backward()
         for name, p in model.named_parameters():

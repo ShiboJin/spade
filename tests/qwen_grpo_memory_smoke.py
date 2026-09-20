@@ -21,6 +21,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--length", type=int, default=16384)
     parser.add_argument("--microbatches", type=int, default=3)
+    parser.add_argument("--reentrant-checkpoint", action="store_true",
+                        help="Simulate Swift enabling HF checkpointing after FSDP setup")
     parser.add_argument("--reserve-gib", type=float, default=1.0)
     parser.add_argument("--rank0-extra-reserve-gib", type=float, default=2.0)
     parser.add_argument("--memory-limit-gib", type=int, default=160)
@@ -71,6 +73,9 @@ def main():
             print("SPADE checkpointed decoder layers:", sum(bool(getattr(m, "_spade_checkpointed", False))
                   for m in model.modules()), flush=True)
         model.train()
+        if args.reentrant_checkpoint:
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
+            model.enable_input_require_grads()
         # Include headroom for vLLM/CUDA contexts left resident after sleep.
         reserve_bytes = int((args.reserve_gib + (args.rank0_extra_reserve_gib if dist.get_rank() == 0 else 0)) * 1024**3)
         reserve = torch.empty(reserve_bytes, dtype=torch.uint8, device=accelerator.device)
@@ -86,6 +91,9 @@ def main():
         with torch.no_grad():
             old, _ = GRPOTrainer._get_logps_via_local_forward(trainer, model, inputs, keep, tokens)
         assert torch.isfinite(old).all()
+        if args.reentrant_checkpoint:
+            guarded = [m for m in model.modules() if getattr(m, "_spade_checkpointed", False)]
+            assert guarded and all(not m.gradient_checkpointing for m in guarded)
         print(f"rank {dist.get_rank()}: old logps passed", flush=True)
         for step in range(args.microbatches):
             with accelerator.accumulate(model):

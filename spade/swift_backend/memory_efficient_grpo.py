@@ -91,6 +91,23 @@ def checkpoint_decoder_layers(model, *, offload_inputs=True):
 
         layer.forward = forward
         layer._spade_checkpointed = True
+    # Swift/PEFT can enable HF reentrant checkpointing after FSDP preparation.
+    # Its outer no-grad forward bypasses our checkpoint/offload code, while
+    # retaining every decoder input on GPU. These layers already own their
+    # checkpoint policy; restore that ownership before each root forward.
+    if not getattr(model, "_spade_checkpoint_policy_guard", False):
+        def disable_outer_checkpointing(root, _args):
+            disabled = 0
+            for module in root.modules():
+                if (getattr(module, "_spade_checkpointed", False)
+                        and getattr(module, "gradient_checkpointing", False)):
+                    module.gradient_checkpointing = False
+                    disabled += 1
+            if disabled:
+                get_logger().info("Disabled outer HF checkpointing on %s SPADE-managed decoder layers", disabled)
+
+        model.register_forward_pre_hook(disable_outer_checkpointing)
+        model._spade_checkpoint_policy_guard = True
     return model
 
 
