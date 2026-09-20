@@ -41,6 +41,14 @@ FIELDS = {
     "save_every", "save_total_limit",
 }
 MEMORY_DEFAULTS = {"memory_limit_gib": 160, "host_memory_reserve_gib": DEFAULT_RESERVE_GIB}
+# Preserve the validated low-memory behavior for existing configuration files.
+GRPO_MEMORY_DEFAULTS = {
+    "grpo_chunked_logps": True,
+    "grpo_logps_chunk_size": 128,
+    "grpo_decoder_checkpointing": True,
+    "grpo_cpu_activation_offload": True,
+    "grpo_checkpoint_delta_rule": True,
+}
 
 
 def write_json(path: Path, value) -> None:
@@ -72,8 +80,9 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
         raise ValueError("Config must contain exactly 'training' and 'accelerate' mappings")
     if not isinstance(document["training"], dict) or not isinstance(document["accelerate"], dict):
         raise ValueError("training and accelerate must be mappings")
-    cfg = {**MEMORY_DEFAULTS, **document["training"]}
-    missing, unknown = FIELDS - cfg.keys(), cfg.keys() - (FIELDS | MEMORY_DEFAULTS.keys())
+    cfg = {**MEMORY_DEFAULTS, **GRPO_MEMORY_DEFAULTS, **document["training"]}
+    missing = FIELDS - cfg.keys()
+    unknown = cfg.keys() - (FIELDS | MEMORY_DEFAULTS.keys() | GRPO_MEMORY_DEFAULTS.keys())
     if missing:
         raise ValueError(f"Missing training settings: {sorted(missing)}")
     if unknown:
@@ -106,7 +115,7 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
         "batch_size", "per_device_train_batch_size", "num_substeps",
         "max_rollout_attempts", "lora_rank", "lora_alpha", "max_turns",
         "max_context_length", "actor_max_tokens", "vllm_tensor_parallel",
-        "actor_top_k", "save_every", "save_total_limit", "move_model_batches",
+        "actor_top_k", "save_every", "save_total_limit", "move_model_batches", "grpo_logps_chunk_size",
     )
     for key in positive_ints:
         if type(cfg[key]) is not int or cfg[key] < 1:
@@ -117,9 +126,12 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
         raise ValueError("fixed_pool_seed must be an integer in [0, 2**63)")
     for key in ("dataset_shuffle", "remove_constant_reward_groups", "enable_thinking",
                 "preserve_thinking", "overlong_filter", "rollout_json_export",
-                "wandb_enabled"):
+                "wandb_enabled", "grpo_chunked_logps", "grpo_decoder_checkpointing",
+                "grpo_cpu_activation_offload", "grpo_checkpoint_delta_rule"):
         if type(cfg[key]) is not bool:
             raise ValueError(f"{key} must be a boolean")
+    if cfg["grpo_cpu_activation_offload"] and not cfg["grpo_decoder_checkpointing"]:
+        raise ValueError("grpo_cpu_activation_offload requires grpo_decoder_checkpointing")
     if cfg["wandb_mode"] not in ("online", "offline"):
         raise ValueError("wandb_mode must be online or offline")
     if not isinstance(cfg["wandb_project"], str) or not cfg["wandb_project"].strip():
@@ -296,6 +308,11 @@ def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[
         "TRAIN_SEED": cfg["seed"],
         "LORA_RANK": cfg["lora_rank"],
         "LORA_ALPHA": cfg["lora_alpha"],
+        "SPADE_GRPO_CHUNKED_LOGPS": str(cfg["grpo_chunked_logps"]).lower(),
+        "SPADE_GRPO_LOGPS_CHUNK_SIZE": cfg["grpo_logps_chunk_size"],
+        "SPADE_GRPO_DECODER_CHECKPOINTING": str(cfg["grpo_decoder_checkpointing"]).lower(),
+        "SPADE_GRPO_CPU_ACTIVATION_OFFLOAD": str(cfg["grpo_cpu_activation_offload"]).lower(),
+        "SPADE_GRPO_CHECKPOINT_DELTA_RULE": str(cfg["grpo_checkpoint_delta_rule"]).lower(),
         "MAX_TURNS": cfg["max_turns"],
         "MAX_LENGTH": cfg["max_context_length"],
         "MAX_COMPLETION_LENGTH": cfg["actor_max_tokens"],

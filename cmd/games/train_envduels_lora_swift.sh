@@ -96,9 +96,9 @@ exec accelerate launch \
     --dataset_shuffle "$DATASET_SHUFFLE" \
     --load_from_cache_file false \
     --split_dataset_ratio 0 \
-    --external_plugins spade/swift_backend/fsdp_ram_loader.py spade/swift_backend/envduels_gym.py spade/swift_backend/wandb_config.py \
+    --external_plugins spade/swift_backend/fsdp_ram_loader.py spade/swift_backend/memory_efficient_grpo.py spade/swift_backend/envduels_gym.py spade/swift_backend/envduels_scheduler.py spade/swift_backend/wandb_config.py \
     --callbacks envduels_wandb_config \
-    --multi_turn_scheduler gym_scheduler \
+    --multi_turn_scheduler envduels_scheduler \
     --gym_env envduels \
     --use_gym_env true \
     --max_turns "$MAX_TURNS" \

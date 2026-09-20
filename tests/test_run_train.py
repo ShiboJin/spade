@@ -36,6 +36,11 @@ class TrainingLauncherTests(unittest.TestCase):
         self.assertIn("NUM_ITERATIONS=1", command)
         self.assertIn("LEARNING_RATE=1e-06", command)
         self.assertIn("LORA_RANK=32", command)
+        self.assertIn("SPADE_GRPO_CHUNKED_LOGPS=true", command)
+        self.assertIn("SPADE_GRPO_LOGPS_CHUNK_SIZE=128", command)
+        self.assertIn("SPADE_GRPO_DECODER_CHECKPOINTING=true", command)
+        self.assertIn("SPADE_GRPO_CPU_ACTIVATION_OFFLOAD=true", command)
+        self.assertIn("SPADE_GRPO_CHECKPOINT_DELTA_RULE=true", command)
         self.assertIn("SCALE_REWARDS=none", command)
         self.assertIn("PPO_CLIP_LOW=0.2", command)
         self.assertIn("PPO_CLIP_HIGH=0.28", command)
@@ -97,7 +102,10 @@ class TrainingLauncherTests(unittest.TestCase):
             {"gpu_ids": [0, 0]},
             {"vllm_tensor_parallel": 3},
             {"move_model_batches": 0},
-            {"actor_max_tokens": 8192},
+            {"max_context_length": 8192, "actor_max_tokens": 8192},
+            {"grpo_logps_chunk_size": 0},
+            {"grpo_chunked_logps": "true"},
+            {"grpo_decoder_checkpointing": False, "grpo_cpu_activation_offload": True},
             {"learning_rate": float("nan")},
             {"max_steps": True},
             {"trajectories_per_game": 1, "batch_size": 6},
@@ -125,6 +133,14 @@ class TrainingLauncherTests(unittest.TestCase):
             path.write_text(json.dumps(document))
             with self.assertRaisesRegex(ValueError, "num_processes"):
                 load_config(path)
+
+    def test_a100_profile_disables_extra_activation_offload_and_recomputation(self):
+        cfg = load_config(ROOT / "configs/train_qwen38_envduels_lora_a100_80gb.json")
+        command, _ = docker_command(cfg, ROOT / "outputs/training/test-a100", "test-a100")
+        self.assertIn("SPADE_GRPO_CHUNKED_LOGPS=true", command)
+        self.assertIn("SPADE_GRPO_DECODER_CHECKPOINTING=false", command)
+        self.assertIn("SPADE_GRPO_CPU_ACTIVATION_OFFLOAD=false", command)
+        self.assertIn("SPADE_GRPO_CHECKPOINT_DELTA_RULE=false", command)
 
     def test_ms_swift_fsdp_config_matches_accelerate(self):
         document = json.loads((ROOT / "configs/train_qwen38_envduels_lora.json").read_text())

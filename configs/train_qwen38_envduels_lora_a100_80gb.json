@@ -45,9 +45,9 @@
 
     "grpo_chunked_logps": true,
     "grpo_logps_chunk_size": 128,
-    "grpo_decoder_checkpointing": true,
-    "grpo_cpu_activation_offload": true,
-    "grpo_checkpoint_delta_rule": true,
+    "grpo_decoder_checkpointing": false,
+    "grpo_cpu_activation_offload": false,
+    "grpo_checkpoint_delta_rule": false,
 
     "vllm_tensor_parallel": 8,
     "move_model_batches": 64,
@@ -62,7 +62,7 @@
     "wandb_mode": "online",
     "wandb_project": "envduels",
     "wandb_entity": null,
-    "wandb_run_name": "qwen38-27b-lora-grpo-v1",
+    "wandb_run_name": "qwen38-27b-lora-grpo-a100-80gb",
 
     "resume_from_checkpoint": null,
     "save_every": 5,

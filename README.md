@@ -75,6 +75,9 @@ Python 3.10 through 3.12 are supported; `python -m pip install -e ".[dev]"` adds
 
 ### Training
 
+For Qwen3.8-27B EnvDuels LoRA GRPO in the unified Docker runtime, see the
+[4090 and A100 80GB training profiles](configs/TRAINING.md).
+
 The launchers read paths and credentials from the environment:
 
 ```bash
