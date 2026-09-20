@@ -16,8 +16,8 @@ class TrainingLauncherTests(unittest.TestCase):
             path.write_text(json.dumps(document))
             return load_config(path)
 
-    def test_default_config_and_docker_command(self):
-        cfg = self.config()
+    def test_online_config_and_docker_command(self):
+        cfg = self.config(wandb_mode="online")
         self.assertEqual(cfg["dataset_rows"], 90)
         self.assertEqual(cfg["gpu_ids"], list(range(8)))
         run_dir = ROOT / "outputs/training/test-run"
@@ -57,6 +57,8 @@ class TrainingLauncherTests(unittest.TestCase):
             "WANDB_DIR=/workspace/envduels/spade/outputs/training/test-run/wandb",
             command,
         )
+        self.assertIn("WANDB_DATA_DIR=/workspace/envduels/spade/outputs/training/test-run/wandb/data", command)
+        self.assertIn("WANDB_CACHE_DIR=/workspace/envduels/spade/outputs/training/test-run/wandb/cache", command)
         self.assertIn(
             "SPADE_RESOLVED_CONFIG=/workspace/envduels/spade/outputs/training/test-run/resolved_config.json",
             command,
@@ -195,6 +197,8 @@ class TrainingLauncherTests(unittest.TestCase):
     def test_training_script_saves_resumable_checkpoints(self):
         script = (ROOT / "cmd/games/train_envduels_lora_swift.sh").read_text()
         self.assertIn("spade/swift_backend/rlhf_entry.py", script)
+        self.assertIn("spade/swift_backend/epoch_checkpoints.py", script)
+        self.assertIn("--callbacks envduels_wandb_config envduels_epoch_checkpoints", script)
         self.assertNotIn("--save_only_model", script)
         self.assertIn('--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT"', script)
         self.assertIn('--fsdp "$FSDP_CONFIG"', script)
@@ -207,7 +211,8 @@ class TrainingLauncherTests(unittest.TestCase):
         self.assertNotIn("--gradient_checkpointing true", script)
 
     def test_offline_wandb_keeps_training_network_disabled(self):
-        cfg = self.config(wandb_mode="offline")
+        cfg = self.config()
+        self.assertEqual(cfg["wandb_mode"], "offline")
         command, _ = docker_command(cfg, ROOT / "outputs/training/offline", "offline")
         self.assertEqual(command[command.index("--network") + 1], "none")
         self.assertIn("WANDB_MODE=offline", command)

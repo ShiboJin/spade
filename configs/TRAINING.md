@@ -4,6 +4,12 @@ Run from the repository root using the unified training image, the local model
 and the EnvDuels export configured in the JSON. Online W&B requires
 `WANDB_API_KEY` in the host environment. Set `wandb_mode` to `offline` in the
 configuration if online tracking is not needed.
+The 4090 profile currently uses `offline` so W&B API outages do not prevent
+training from starting. Metrics and completions tables are stored locally in
+`outputs/training/<run>/wandb/wandb/offline-run-*`; they are not streamed to the
+dashboard. Once connectivity is restored, run `wandb sync <offline-run-directory>`
+in an environment with W&B installed, network access and your W&B credentials.
+Set `wandb_mode` back to `online` when live tracking is required.
 
 ```bash
 # Existing low-memory profile (8 x RTX 4090)
@@ -15,6 +21,16 @@ python3 scripts/run_train.py --config configs/train_qwen38_envduels_lora_a100_80
 
 Both profiles retain 16K context, 24 turns, TP=8, a batch of 24 trajectories and
 three gradient accumulation microbatches. They save every five optimizer steps.
+The latest three rolling `checkpoint-N` directories are retained. At each full
+epoch boundary, a complete resumable copy is also kept under
+`epoch_checkpoints/epoch-001-step-15` (then epoch 002/step 30 and epoch 003/step 45
+for these profiles). These independent copies are not subject to
+`save_total_limit`. Only the latest completed epoch archive is retained: after
+the new archive has been copied successfully, older epoch archives are deleted.
+Allow space for both old and new archives while the copy is in progress.
+If an epoch boundary is not a regular save step, the callback requests a save.
+Stopping partway through an epoch does not create a completed-epoch archive.
+Set `resume_from_checkpoint` to an archive directory to resume from it.
 The A100 profile has not been benchmarked or validated on A100 hardware. It
 retains ordinary FSDP activation checkpointing and disables the additional
 low-memory decoder and gated-delta recomputation paths. It disables enforced

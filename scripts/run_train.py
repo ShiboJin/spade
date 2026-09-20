@@ -378,6 +378,8 @@ def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[
             "WANDB_MODE": cfg["wandb_mode"],
             "WANDB_PROJECT": cfg["wandb_project"],
             "WANDB_DIR": container_path(run_dir / "wandb"),
+            "WANDB_DATA_DIR": container_path(run_dir / "wandb" / "data"),
+            "WANDB_CACHE_DIR": container_path(run_dir / "wandb" / "cache"),
             "WANDB_LOG_MODEL": "false",
             "WANDB_WATCH": "false",
             "SPADE_RESOLVED_CONFIG": container_path(run_dir / "resolved_config.json"),
@@ -447,7 +449,8 @@ def run_training(cfg, run_dir, container_name, command, report):
     ).strip()
     run_dir.mkdir(parents=True, exist_ok=False)
     if cfg["wandb_enabled"]:
-        (run_dir / "wandb").mkdir()
+        for subdirectory in ("data", "cache"):
+            (run_dir / "wandb" / subdirectory).mkdir(parents=True, exist_ok=True)
     write_json(run_dir / "accelerate_config.json", cfg["accelerate"])
     write_json(run_dir / "resolved_config.json", report)
     write_json(run_dir / "launch.json", {"image_id": image_id, "command": command})
