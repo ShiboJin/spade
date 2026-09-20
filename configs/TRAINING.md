@@ -54,3 +54,32 @@ For a real one-step checkpoint check, copy the chosen JSON, set `save_every` to
 `1`, and pass `--max-steps 1`. Training logs and checkpoints remain under
 `outputs/training/`; generated artifacts and local `/tmp` configs are not Git
 inputs. A synthetic memory test does not validate rollout or checkpoint saving.
+
+## Fast checks after a delta-rule OOM
+
+Inside the training image, from the checkout root:
+
+```bash
+# Single GPU; no checkpoint loading, no game rollout. Uses 27B head dimensions.
+python3 tests/delta_rule_memory_smoke.py --length 16384
+
+# Small Qwen/LoRA model; verify FSDP2 gradients with the outer checkpoint mode
+# observed in Swift's training traceback. Requires two free GPUs.
+CUDA_VISIBLE_DEVICES=0,3 torchrun --standalone --nproc_per_node=2 \
+  tests/fsdp_chunked_logps_smoke.py --reentrant-checkpoint
+```
+
+The first check compares the original and segmented no-grad fallback's outputs,
+recurrent state, elapsed GPU work and incremental peak allocated memory. It uses
+synthetic tensors, not saved rollout data or the complete process memory state.
+The failed process cannot resume at the exception without a previously saved
+input snapshot. These checks isolate the failing operation without repeating
+rollout, but do not establish the full 27B training peak or vLLM coexistence.
+
+Long no-grad delta-rule calls must still be segmented: both old-policy scoring
+and the initial forward of a reentrant checkpoint can disable gradients. The
+training launcher also binds `LOCAL_RANK` before importing Swift pipelines and
+enables `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. The pinned vLLM build
+temporarily disables expandable segments within its sleep memory pool; recheck
+this compatibility if replacing the image. Early binding is a precaution, not
+proof that all secondary GPU0 contexts have been eliminated.

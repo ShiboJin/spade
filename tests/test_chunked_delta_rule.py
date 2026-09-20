@@ -8,6 +8,30 @@ from spade.swift_backend.chunked_delta_rule import checkpointed_delta_rule
 
 
 class DeltaRuleTests(unittest.TestCase):
+    def test_no_grad_still_segments_and_preserves_state(self):
+        torch.manual_seed(32)
+        q, k, v = [torch.randn(1, 529, 2, 8) for _ in range(3)]
+        g, beta = -torch.rand(1, 529, 2), torch.rand(1, 529, 2)
+        state = torch.randn(1, 2, 8, 8) * 0.1
+        lengths = []
+
+        def tracked(*args, **kwargs):
+            lengths.append(args[0].shape[1])
+            return torch_chunk_gated_delta_rule(*args, **kwargs)
+
+        with torch.no_grad():
+            for final_state in (False, True):
+                options = dict(initial_state=state, output_final_state=final_state,
+                               use_qk_l2norm_in_kernel=True)
+                expected, expected_state = torch_chunk_gated_delta_rule(q, k, v, g, beta, **options)
+                actual, actual_state = checkpointed_delta_rule(tracked, q, k, v, g, beta, **options)
+                torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-5)
+                if final_state:
+                    torch.testing.assert_close(actual_state, expected_state, rtol=2e-4, atol=2e-5)
+                else:
+                    self.assertIsNone(actual_state)
+        self.assertEqual(lengths, [256, 256, 17] * 2)
+
     def compare(self, device="cpu", dtype=torch.float32):
         torch.manual_seed(31)
         shape = (1, 529, 2, 8)  # Two full segments and a padded final segment.

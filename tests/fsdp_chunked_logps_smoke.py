@@ -1,5 +1,6 @@
 """Run with torchrun: real Qwen/LoRA/FSDP2 probability and gradient parity."""
 import os
+import argparse
 from pathlib import Path
 import sys
 from types import MethodType, SimpleNamespace
@@ -11,6 +12,10 @@ from torch.distributed.fsdp import fully_shard
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--reentrant-checkpoint", action="store_true",
+                        help="Reproduce Swift's outer no-grad checkpoint forward")
+    args = parser.parse_args()
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     dist.init_process_group("nccl")
     try:
@@ -40,6 +45,9 @@ def main():
             if "lora_B" in name:
                 torch.nn.init.normal_(param, std=0.02)
         model.cuda().train()
+        if args.reentrant_checkpoint:
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
+            model.enable_input_require_grads()
         layers = model.base_model.model.model.language_model.layers
         for i, layer in enumerate(layers):
             fully_shard(layers[i], reshard_after_forward=True)

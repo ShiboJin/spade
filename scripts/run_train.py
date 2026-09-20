@@ -370,6 +370,8 @@ def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[
         "TRITON_CACHE_DIR": "/tmp/triton",
         "TORCHINDUCTOR_CACHE_DIR": "/tmp/inductor",
         "PYTHONUNBUFFERED": 1,
+        # Pinned vLLM temporarily disables this inside its sleep memory pool.
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     }
     if cfg["wandb_enabled"]:
         environment.update({

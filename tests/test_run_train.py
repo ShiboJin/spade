@@ -88,6 +88,7 @@ class TrainingLauncherTests(unittest.TestCase):
         self.assertEqual(command[command.index("--memory-swappiness") + 1], "0")
         self.assertIn("SPADE_MEMORY_LIMIT_GIB=160", command)
         self.assertIn("USER=envduels", command)
+        self.assertIn("PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True", command)
         self.assertIn("XDG_CONFIG_HOME=/tmp/config", command)
         self.assertIn("VLLM_CONFIG_ROOT=/tmp/vllm-config", command)
         self.assertIn("VLLM_NO_USAGE_STATS=1", command)
@@ -193,6 +194,7 @@ class TrainingLauncherTests(unittest.TestCase):
 
     def test_training_script_saves_resumable_checkpoints(self):
         script = (ROOT / "cmd/games/train_envduels_lora_swift.sh").read_text()
+        self.assertIn("spade/swift_backend/rlhf_entry.py", script)
         self.assertNotIn("--save_only_model", script)
         self.assertIn('--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT"', script)
         self.assertIn('--fsdp "$FSDP_CONFIG"', script)

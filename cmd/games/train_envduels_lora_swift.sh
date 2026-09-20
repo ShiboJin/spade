@@ -86,7 +86,7 @@ fi
 exec accelerate launch \
     --config_file "$ACCELERATE_CONFIG" \
     --num_processes "$NUM_GPUS" \
-    /opt/ms-swift/swift/cli/rlhf.py \
+    spade/swift_backend/rlhf_entry.py \
     --rlhf_type grpo \
     --model "$MODEL" \
     --model_type qwen3_5 \
