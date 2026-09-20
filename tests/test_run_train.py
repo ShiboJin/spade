@@ -17,7 +17,8 @@ class TrainingLauncherTests(unittest.TestCase):
             return load_config(path)
 
     def test_online_config_and_docker_command(self):
-        cfg = self.config(wandb_mode="online")
+        cfg = self.config()
+        self.assertEqual(cfg["wandb_mode"], "online")
         self.assertEqual(cfg["dataset_rows"], 90)
         self.assertEqual(cfg["gpu_ids"], list(range(8)))
         run_dir = ROOT / "outputs/training/test-run"
@@ -211,7 +212,7 @@ class TrainingLauncherTests(unittest.TestCase):
         self.assertNotIn("--gradient_checkpointing true", script)
 
     def test_offline_wandb_keeps_training_network_disabled(self):
-        cfg = self.config()
+        cfg = self.config(wandb_mode="offline")
         self.assertEqual(cfg["wandb_mode"], "offline")
         command, _ = docker_command(cfg, ROOT / "outputs/training/offline", "offline")
         self.assertEqual(command[command.index("--network") + 1], "none")

@@ -63,7 +63,7 @@
     "rollout_json_export": true,
 
     "wandb_enabled": true,
-    "wandb_mode": "offline",
+    "wandb_mode": "online",
     "wandb_project": "envduels",
     "wandb_entity": null,
     "wandb_run_name": "qwen38-27b-lora-grpo-v1",

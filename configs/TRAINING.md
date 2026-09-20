@@ -4,8 +4,9 @@ Run from the repository root using the unified training image, the local model
 and the EnvDuels export configured in the JSON. Online W&B requires
 `WANDB_API_KEY` in the host environment. Set `wandb_mode` to `offline` in the
 configuration if online tracking is not needed.
-The 4090 profile currently uses `offline` so W&B API outages do not prevent
-training from starting. Metrics and completions tables are stored locally in
+The 4090 profile uses `online` for live tracking. If API outages prevent
+training from starting, `offline` can be selected explicitly. In offline mode,
+metrics and completions tables are stored locally in
 `outputs/training/<run>/wandb/wandb/offline-run-*`; they are not streamed to the
 dashboard. Once connectivity is restored, run `wandb sync <offline-run-directory>`
 in an environment with W&B installed, network access and your W&B credentials.
