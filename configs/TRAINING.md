@@ -12,6 +12,12 @@ dashboard. Once connectivity is restored, run `wandb sync <offline-run-directory
 in an environment with W&B installed, network access and your W&B credentials.
 Set `wandb_mode` back to `online` when live tracking is required.
 
+Set the optional training setting `author` to an exact author value from the
+EnvDuels manifest (for example, `"qwen3.8-27b"`). The launcher validates the
+full exported pool but materializes a run-local dataset containing only that
+author's environments, and Swift trains exclusively on those rows. Leave it as
+`null` or omit it to train on every environment in the export.
+
 ```bash
 # Existing low-memory profile (8 x RTX 4090)
 python3 scripts/run_train.py --config configs/train_qwen38_envduels_lora.json
