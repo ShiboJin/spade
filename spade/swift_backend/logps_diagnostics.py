@@ -14,7 +14,9 @@ def input_fingerprint(inputs):
         value = inputs[key]
         if isinstance(value, torch.Tensor):
             digest.update(str((key, tuple(value.shape), value.dtype)).encode())
-            digest.update(value.detach().contiguous().view(torch.uint8).cpu().numpy().tobytes())
+            # dtype views require at least one dimension when element sizes
+            # differ. Preserve the original shape above, then flatten for bytes.
+            digest.update(value.detach().reshape(-1).contiguous().view(torch.uint8).cpu().numpy().tobytes())
         elif isinstance(value, (bool, int, float, str, type(None))):
             digest.update(repr((key, value)).encode())
     return digest.hexdigest()

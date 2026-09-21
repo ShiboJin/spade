@@ -13,6 +13,24 @@ from spade.swift_backend.logps_diagnostics import (
 
 
 class LogpsDiagnosticsTests(unittest.TestCase):
+    def test_scalar_fingerprints_preserve_value_shape_and_dtype(self):
+        for dtype in (torch.int32, torch.int64, torch.float32, torch.bfloat16, torch.bool):
+            with self.subTest(dtype=dtype):
+                scalar = torch.tensor(1, dtype=dtype)
+                fingerprint = input_fingerprint({"scalar": scalar})
+                self.assertEqual(fingerprint, input_fingerprint({"scalar": scalar.clone()}))
+                self.assertNotEqual(fingerprint, input_fingerprint({"scalar": torch.tensor(0, dtype=dtype)}))
+                self.assertNotEqual(fingerprint, input_fingerprint({"scalar": scalar.reshape(1)}))
+        self.assertNotEqual(input_fingerprint({"scalar": torch.tensor(1, dtype=torch.int32)}),
+                            input_fingerprint({"scalar": torch.tensor(1, dtype=torch.int64)}))
+
+    def test_empty_and_noncontiguous_tensors(self):
+        for value in (torch.empty(0, dtype=torch.int32), torch.empty(2, 0, dtype=torch.bfloat16),
+                      torch.arange(12).reshape(3, 4).t(), torch.tensor([7]).expand(4)):
+            with self.subTest(shape=value.shape, stride=value.stride()):
+                self.assertEqual(input_fingerprint({"value": value}),
+                                 input_fingerprint({"value": value.contiguous()}))
+
     def summarize(self, current, old, advantage, mask):
         return summarize_logps(current, old, advantage, mask, epsilon_low=0.2, epsilon_high=0.28)
 
@@ -62,7 +80,9 @@ class LogpsDiagnosticsTests(unittest.TestCase):
             trainer.rollout_importance_sampling_mode = None
             batch = SimpleNamespace(old_per_token_logps=None, completion_mask=torch.ones(1, 2, dtype=torch.bool),
                                     advantages=torch.tensor([[.75, .75]]))
-            inputs = {"input_ids": torch.tensor([[1, 2]])}
+            # The real Swift model inputs also contain zero-dimensional Int
+            # metadata. Exercise both old/no-grad and current/grad hook paths.
+            inputs = {"input_ids": torch.tensor([[1, 2]]), "scalar_metadata": torch.tensor(2, dtype=torch.int32)}
             with torch.no_grad():
                 old, _ = trainer._get_per_token_logps_and_entropies(trainer.model, inputs, batch)
             batch.old_per_token_logps = old
