@@ -12,6 +12,7 @@
     "model": "checkpoints/Qwen3.8-27B",
     "dataset": "data/envduels/envduels-4x200-qwen-non-00-swift.jsonl",
     "export_dir": "../exports/envduels_4x200_qwen_non_00",
+    "author": "qwen3.8-27b",
     "output_dir": "outputs/training",
     "fixed_pool_seed": 42,
     "fixed_pool_epochs": 1,

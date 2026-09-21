@@ -40,6 +40,7 @@ FIELDS = {
     "wandb_run_name", "resume_from_checkpoint",
     "save_every", "save_total_limit",
 }
+SELECTION_DEFAULTS = {"author": None}
 MEMORY_DEFAULTS = {"memory_limit_gib": 160, "host_memory_reserve_gib": DEFAULT_RESERVE_GIB}
 ROLLOUT_DEFAULTS = {
     "sage_hint_resampling": True,
@@ -87,11 +88,23 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
         raise ValueError("Config must contain exactly 'training' and 'accelerate' mappings")
     if not isinstance(document["training"], dict) or not isinstance(document["accelerate"], dict):
         raise ValueError("training and accelerate must be mappings")
-    cfg = {**MEMORY_DEFAULTS, **GRPO_MEMORY_DEFAULTS, **ROLLOUT_DEFAULTS, **document["training"]}
+    cfg = {
+        **MEMORY_DEFAULTS,
+        **GRPO_MEMORY_DEFAULTS,
+        **ROLLOUT_DEFAULTS,
+        **SELECTION_DEFAULTS,
+        **document["training"],
+    }
     # Compatibility with older configs: SAGE now trains every full batch.
     cfg.pop("min_valid_groups", None)
     missing = FIELDS - cfg.keys()
-    unknown = cfg.keys() - (FIELDS | MEMORY_DEFAULTS.keys() | GRPO_MEMORY_DEFAULTS.keys() | ROLLOUT_DEFAULTS.keys())
+    unknown = cfg.keys() - (
+        FIELDS
+        | MEMORY_DEFAULTS.keys()
+        | GRPO_MEMORY_DEFAULTS.keys()
+        | ROLLOUT_DEFAULTS.keys()
+        | SELECTION_DEFAULTS.keys()
+    )
     if missing:
         raise ValueError(f"Missing training settings: {sorted(missing)}")
     if unknown:
@@ -108,6 +121,10 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
     for key in ("image", "model", "dataset", "export_dir", "output_dir"):
         if not isinstance(cfg[key], str) or not cfg[key].strip():
             raise ValueError(f"{key} must be a nonempty string")
+    if cfg["author"] is not None and (
+        not isinstance(cfg["author"], str) or not cfg["author"].strip()
+    ):
+        raise ValueError("author must be null or a nonempty string")
     if cfg["resume_from_checkpoint"] is not None and (
         not isinstance(cfg["resume_from_checkpoint"], str)
         or not cfg["resume_from_checkpoint"].strip()
@@ -213,14 +230,25 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
     if not (cfg["export_dir"] / "manifest.json").is_file():
         raise ValueError(f"Missing EnvDuels export: {cfg['export_dir']}")
     manifest = json.loads((cfg["export_dir"] / "manifest.json").read_text(encoding="utf-8"))
-    manifest_ids = [item.get("id") for item in manifest.get("environments", [])]
+    manifest_rows = manifest.get("environments", [])
+    manifest_ids = [item.get("id") for item in manifest_rows]
     if not manifest_ids or any(not isinstance(env_id, str) or not env_id for env_id in manifest_ids):
         raise ValueError("EnvDuels manifest has invalid environment IDs")
     if len(manifest_ids) != len(set(manifest_ids)):
         raise ValueError("EnvDuels manifest has duplicate environment IDs")
+    selected_manifest_rows = manifest_rows
+    if cfg["author"] is not None:
+        selected_manifest_rows = [row for row in manifest_rows if row.get("author") == cfg["author"]]
+        if not selected_manifest_rows:
+            available = sorted({row.get("author") for row in manifest_rows if row.get("author")})
+            raise ValueError(
+                f"No EnvDuels environments found for author {cfg['author']!r}; "
+                f"available authors: {available}"
+            )
+    selected_manifest_ids = {row["id"] for row in selected_manifest_rows}
     if cfg["sage_hint_resampling"]:
         from spade.core.envduels_hints import load_hint_levels
-        for row in manifest["environments"]:
+        for row in selected_manifest_rows:
             if not load_hint_levels(cfg["export_dir"], row):
                 raise ValueError(f"SAGE training requires an author hint: {row['id']}")
     accelerate = document["accelerate"]
@@ -236,6 +264,7 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
     cfg["accelerate"] = accelerate
 
     rows = 0
+    all_environment_counts = Counter()
     environment_counts = Counter()
     environment_seeds = set()
     with cfg["dataset"].open(encoding="utf-8") as stream:
@@ -259,11 +288,13 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
                     f"Training row {number} seed does not match fixed_pool_seed={cfg['fixed_pool_seed']}"
                 )
             environment_seeds.add((env_id, seed))
-            environment_counts[env_id] += 1
-            rows += 1
-    if set(environment_counts) != set(manifest_ids):
+            all_environment_counts[env_id] += 1
+            if env_id in selected_manifest_ids:
+                environment_counts[env_id] += 1
+                rows += 1
+    if set(all_environment_counts) != set(manifest_ids):
         raise ValueError("Fixed dataset must contain every exported environment exactly once")
-    if any(count != 1 for count in environment_counts.values()):
+    if any(count != 1 for count in all_environment_counts.values()):
         raise ValueError("Fixed dataset must contain exactly one row per environment")
     # Swift/TRL's RepeatSampler drops the final incomplete generation group
     # after shuffling. Keep the full dataset available for future epochs.
@@ -299,8 +330,30 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
     return cfg
 
 
+def write_selected_dataset(cfg: dict, path: Path) -> None:
+    """Materialize the author-filtered JSONL consumed by Swift."""
+    if cfg["author"] is None:
+        return
+    manifest = json.loads((cfg["export_dir"] / "manifest.json").read_text(encoding="utf-8"))
+    selected_ids = {
+        row["id"] for row in manifest["environments"] if row.get("author") == cfg["author"]
+    }
+    selected_lines = []
+    with cfg["dataset"].open(encoding="utf-8") as stream:
+        for line in stream:
+            if line.strip() and json.loads(line)["env_config"]["env_id"] in selected_ids:
+                selected_lines.append(line if line.endswith("\n") else line + "\n")
+    if len(selected_lines) != cfg["dataset_rows"]:
+        raise ValueError(
+            f"Author-filtered dataset changed after validation: "
+            f"expected {cfg['dataset_rows']} rows, got {len(selected_lines)}"
+        )
+    path.write_text("".join(selected_lines), encoding="utf-8")
+
+
 def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[str], Path]:
     checkpoint_dir = run_dir / "checkpoint"
+    training_dataset = run_dir / "selected_dataset.jsonl" if cfg["author"] is not None else cfg["dataset"]
     online_wandb = cfg["wandb_enabled"] and cfg["wandb_mode"] == "online"
     command = [
         "docker", "run", "--rm", "--init", "--name", container_name,
@@ -321,7 +374,7 @@ def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[
         "SPADE_MEMORY_LIMIT_GIB": cfg["memory_limit_gib"],
         "NUM_GPUS": len(cfg["gpu_ids"]),
         "MODEL": container_path(cfg["model"]),
-        "DATASET": container_path(cfg["dataset"]),
+        "DATASET": container_path(training_dataset),
         "OUTPUT_DIR": container_path(checkpoint_dir),
         "ACCELERATE_CONFIG": container_path(run_dir / "accelerate_config.json"),
         "NUM_GENERATIONS": cfg["trajectories_per_game"],
@@ -469,6 +522,7 @@ def run_training(cfg, run_dir, container_name, command, report):
         ["docker", "image", "inspect", cfg["image"], "--format", "{{.Id}}"], text=True
     ).strip()
     run_dir.mkdir(parents=True, exist_ok=False)
+    write_selected_dataset(cfg, run_dir / "selected_dataset.jsonl")
     if cfg["wandb_enabled"]:
         for subdirectory in ("data", "cache"):
             (run_dir / "wandb" / subdirectory).mkdir(parents=True, exist_ok=True)

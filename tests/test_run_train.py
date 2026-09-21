@@ -5,7 +5,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.run_train import ROOT, ROLLOUT_DEFAULTS, docker_command, load_config
+from scripts.run_train import (
+    ROOT, ROLLOUT_DEFAULTS, docker_command, load_config, write_selected_dataset,
+)
 
 
 class TrainingLauncherTests(unittest.TestCase):
@@ -178,6 +180,27 @@ class TrainingLauncherTests(unittest.TestCase):
         self.assertIn("GENERATION_BATCH_SIZE=32", command)
         self.assertIn("GRADIENT_ACCUMULATION_STEPS=8", command)
         self.assertIn("NUM_TRAIN_EPOCHS=3", command)
+
+    def test_author_filters_runtime_dataset_and_training_counts(self):
+        cfg = self.config(author="qwen3.8-27b")
+        self.assertEqual(cfg["author"], "qwen3.8-27b")
+        self.assertEqual(cfg["dataset_rows"], 10)
+        self.assertEqual(cfg["derived"]["dataset_environments"], 10)
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            run_dir = Path(directory)
+            output = run_dir / "selected_dataset.jsonl"
+            write_selected_dataset(cfg, output)
+            rows = [json.loads(line) for line in output.read_text().splitlines()]
+            self.assertEqual(len(rows), 10)
+            self.assertTrue(all("/qwen3.8-27b/" in row["env_id"] for row in rows))
+            command, _ = docker_command(cfg, run_dir, "test-author")
+            self.assertTrue(any(item.startswith("DATASET=") and item.endswith("/selected_dataset.jsonl")
+                                for item in command))
+
+    def test_unknown_and_invalid_author_are_rejected(self):
+        for author, message in (("missing-author", "available authors"), ("", "nonempty"), (1, "nonempty")):
+            with self.subTest(author=author), self.assertRaisesRegex(ValueError, message):
+                self.config(author=author)
 
     def test_pool_must_form_at_least_one_full_batch(self):
         with self.assertRaisesRegex(ValueError, "at least num_games_per_rollout"):
