@@ -159,6 +159,28 @@ class TrainingLauncherTests(unittest.TestCase):
         self.assertEqual(epoch_cfg["fixed_pool_epochs"], 2)
         self.assertEqual(epoch_cfg["derived"]["rollouts_per_environment_total"], 8)
 
+    def test_incomplete_pool_tail_is_dropped_for_four_gpu_training(self):
+        accelerate = {**self.config()["accelerate"], "num_processes": 4}
+        cfg = self.config(num_games_per_rollout=8, batch_size=32, gpu_ids=[0, 1, 2, 3],
+                          vllm_tensor_parallel=4, accelerate=accelerate)
+        self.assertEqual(cfg["dataset_rows"], 90)
+        derived = cfg["derived"]
+        self.assertEqual(derived["sampled_environments_per_dataset_pass"], 88)
+        self.assertEqual(derived["dropped_environments_per_dataset_pass"], 2)
+        self.assertEqual(derived["optimizer_steps_per_dataset_pass"], 11)
+        self.assertEqual(derived["rollouts_per_dataset_pass"], 352)
+        self.assertEqual(derived["gradient_accumulation_steps"], 8)
+        self.assertIsNone(derived["rollouts_per_environment_total"])
+        self.assertIsNone(derived["rollouts_per_environment_per_pool_epoch"])
+        command, _ = docker_command(cfg, ROOT / "outputs/training/test-tail", "test-tail")
+        self.assertIn("GENERATION_BATCH_SIZE=32", command)
+        self.assertIn("GRADIENT_ACCUMULATION_STEPS=8", command)
+        self.assertIn("NUM_TRAIN_EPOCHS=3", command)
+
+    def test_pool_must_form_at_least_one_full_batch(self):
+        with self.assertRaisesRegex(ValueError, "at least num_games_per_rollout"):
+            self.config(num_games_per_rollout=92, batch_size=368)
+
     def test_invalid_settings(self):
         for update in (
             {"gpu_ids": [0, 0]},
@@ -179,7 +201,6 @@ class TrainingLauncherTests(unittest.TestCase):
             {"max_steps": True},
             {"trajectories_per_game": 1, "batch_size": 6},
             {"batch_size": 16},
-            {"num_games_per_rollout": 8, "batch_size": 32},
             {"dataset_shuffle": "true"},
             {"reward_normalization": "typo"},
             {"ppo_clip_low": 0.3, "ppo_clip_high": 0.2},

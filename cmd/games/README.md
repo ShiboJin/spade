@@ -49,6 +49,16 @@ temperature (`--rollout-temperature 1.0`) match across both.
 `scripts/run_train.py` enables `training.sage_hint_resampling` by default. Set it
 explicitly to `false` to reproduce the original no-hint training protocol.
 
+The fixed pool need not divide evenly by `num_games_per_rollout`. Swift/TRL's
+sampler drops the incomplete final generation batch after shuffling each pass;
+for example, 90 environments with 8 groups per batch produce 11 complete windows
+and omit 2 environments from that pass's initial sampling. The dataset stays
+intact for future passes and SAGE refill. With shuffling disabled, the same tail
+is omitted each pass. The pool must still contain at least one full batch.
+Dry-run/resolved configuration reports `sampled_environments_per_dataset_pass`
+and `dropped_environments_per_dataset_pass`; step counts use complete batches.
+These counts describe initial sampling, before hint rescue/refill or skips.
+
 Each group has `trajectories_per_game` independent episodes with the same exported
 environment and fixed seed. Sampling starts without a hint. If every terminal
 reward is zero, resample the **entire group** using the author's hint from the

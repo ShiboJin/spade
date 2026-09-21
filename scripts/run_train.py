@@ -264,17 +264,23 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
         raise ValueError("Fixed dataset must contain every exported environment exactly once")
     if any(count != 1 for count in environment_counts.values()):
         raise ValueError("Fixed dataset must contain exactly one row per environment")
-    if rows % cfg["num_games_per_rollout"]:
-        raise ValueError("Environment count must be divisible by num_games_per_rollout")
+    # Swift/TRL's RepeatSampler drops the final incomplete generation group
+    # after shuffling. Keep the full dataset available for SAGE refill.
+    full_batches, dropped_rows = divmod(rows, cfg["num_games_per_rollout"])
+    if full_batches == 0:
+        raise ValueError("Environment count must be at least num_games_per_rollout to form one full batch")
+    sampled_rows = rows - dropped_rows
     cfg["dataset_rows"] = rows
-    steps_per_dataset_pass = rows // cfg["num_games_per_rollout"] * cfg["num_substeps"]
+    steps_per_dataset_pass = full_batches * cfg["num_substeps"]
     cfg["derived"] = {
         "dataset_environments": len(environment_counts),
+        "sampled_environments_per_dataset_pass": sampled_rows,
+        "dropped_environments_per_dataset_pass": dropped_rows,
         "fixed_instances_per_environment": 1,
-        "rollouts_per_environment_per_pool_epoch": cfg["trajectories_per_game"],
+        "rollouts_per_environment_per_pool_epoch": cfg["trajectories_per_game"] if not dropped_rows else None,
         "rollouts_per_environment_total": (
             cfg["trajectories_per_game"] * cfg["fixed_pool_epochs"]
-            if cfg["max_steps"] is None else None
+            if cfg["max_steps"] is None and not dropped_rows else None
         ),
         "global_micro_batch_rollouts": global_micro_batch,
         "gradient_accumulation_steps": gradient_accumulation_steps,
@@ -282,7 +288,7 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
         "environments_per_generation_batch": cfg["num_games_per_rollout"],
         "environments_per_optimizer_step": cfg["num_games_per_rollout"],
         "optimizer_steps_per_dataset_pass": steps_per_dataset_pass,
-        "rollouts_per_dataset_pass": rows * cfg["trajectories_per_game"],
+        "rollouts_per_dataset_pass": sampled_rows * cfg["trajectories_per_game"],
         "configured_dataset_passes": (
             cfg["max_steps"] / steps_per_dataset_pass
             if cfg["max_steps"] is not None
