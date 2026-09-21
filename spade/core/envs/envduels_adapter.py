@@ -74,7 +74,9 @@ class BoundEnvDuelsEnv:
                 0.0, False, self.turns >= self.max_turns,
                 {"format_error": True},
             )
-        obs, raw_reward, terminated, truncated, info = self.env.step(action)
+        # Exported environments parse boxed commands themselves. Preserve the
+        # envelope while forwarding only the final action (not reasoning/examples).
+        obs, raw_reward, terminated, truncated, info = self.env.step("\\boxed{" + action + "}")
         if not math.isfinite(float(raw_reward)):
             raise ValueError("Non-finite EnvDuels reward")
         reward = float(bool(terminated) and raw_reward > 0)

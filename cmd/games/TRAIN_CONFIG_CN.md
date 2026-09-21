@@ -131,8 +131,9 @@ launcher 会检查以上约束并在启动 GPU 前报错。
 - `trajectories_per_game`：每个环境生成多少条独立轨迹，也是 GRPO group size。
 - `batch_size`：一次 generation 产生的 episode 总数，必须等于前两项的乘积。
 - `per_device_train_batch_size`：每张 GPU 每个 micro-step 训练几条轨迹。27B + 24GB 4090 建议保持 1。
-- `remove_constant_reward_groups`：是否丢弃并重采样 reward 全相同的组。`false` 会保留这些组；其 advantage 全为零，因此不产生 policy-gradient 信号。
-- `max_rollout_attempts`：启用 constant-group 重采样时的最多尝试次数。
+- `remove_constant_reward_groups`：仅在关闭 SAGE 时控制原有 constant-group 重采样。启用 SAGE 时，全 1 组直接屏蔽，全 0 组使用第一个作者 hint 重采一次；最终只保留 0/1 混合组，不换环境补采。
+- `max_rollout_attempts`：启用 SAGE 时必须为 `1`，表示不换环境补采；hint 重采一次独立于这个计数。关闭 SAGE 时控制原有重采样次数。
+- `min_valid_groups`：SAGE 更新所需的最低有效组数，默认 `2`。每组 4 条轨迹时至少 8 条有效轨迹才更新；不足则跳过整个更新窗口，包括 optimizer 和学习率 scheduler。
 
 ## 优化器和 loss
 

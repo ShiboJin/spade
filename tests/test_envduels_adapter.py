@@ -16,7 +16,7 @@ from spade.core.fixed_env_orchestrator import FixedEnvOrchestrator
 from spade.core.types import SpadeConfig, TrajectoryStatus
 
 
-SOURCE = '''
+SOURCE = r'''
 class Env:
     def __init__(self, max_turns):
         self.turns = 0
@@ -25,6 +25,8 @@ class Env:
         return str(seed), {}
     def step(self, action):
         self.turns += 1
+        assert action.startswith("\\boxed{") and action.endswith("}"), action
+        action = action[len("\\boxed{"):-1]
         if action == "CRASH":
             raise RuntimeError("environment crash")
         if action == "READ":

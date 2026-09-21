@@ -1,15 +1,14 @@
-"""Install whole-group hint rescue and bounded fixed-pool refill for ms-swift."""
+"""Install one hinted retry and effective-group selection for ms-swift."""
 from copy import deepcopy
 from functools import wraps
 import json
 import logging
 import os
 from pathlib import Path
-import random
 import weakref
 
 from spade.swift_backend.hint_resampling import (
-    RefillUnavailable, SkipHintBatch, env_config, refill_constant_groups, resample_with_hints, set_hint_level,
+    SkipHintBatch, refill_constant_groups, resample_with_hints, set_hint_level,
 )
 from spade.swift_backend.envduels_sage_loss import install_effective_batch_loss
 
@@ -160,48 +159,6 @@ def install_hint_resampling(trainer_class, gather):
             for key, value in values.items():
                 self._metrics["train"]["sage/" + key].append(value)
 
-        pool = None
-        # Exclusions are batch-local only. Every future dataloader pass keeps the
-        # full fixed pool, including environments which were just discarded.
-        tried = set()
-
-        def refill(pending, current_envs, attempt):
-            nonlocal pool
-            tried.update(current_envs.values())
-            local_error = None
-            try:
-                if pool is None:
-                    pool = {}
-                    for i in range(len(self.train_dataset)):
-                        prototype = self.to_samples([self.train_dataset[i]])[0]
-                        if has_teacher_input(prototype):
-                            raise ValueError("SAGE refill dataset contains unsupported teacher input")
-                        cfg = env_config(prototype)
-                        if not isinstance(cfg, dict) or cfg["env_id"] in pool:
-                            raise ValueError("SAGE refill requires one fixed dataset row per environment")
-                        pool[cfg["env_id"]] = prototype
-                candidates = sorted(set(pool) - tried)
-                if len(candidates) < len(pending):
-                    # Reuse earlier failed environments only after trying the rest
-                    # of the pool, but never duplicate a current batch environment.
-                    candidates = sorted(set(pool) - set(current_envs.values()))
-                if len(candidates) < len(pending):
-                    raise ValueError("Not enough other fixed-pool environments to refill this batch")
-                random.Random(f"{self.args.seed}:{self.state.global_step}:{self._step}:{attempt}").shuffle(candidates)
-                chosen = dict(zip(pending, candidates))
-            except Exception as exc:
-                local_error = str(exc)
-                chosen = {}
-            records = gather([dict(error=local_error, chosen=chosen)])
-            if any(r["error"] for r in records):
-                message = [r['error'] for r in records if r['error']][0]
-                if message.startswith("Not enough other fixed-pool"):
-                    raise RefillUnavailable(message)
-                raise ValueError(f"SAGE refill failed: {message}")
-            if any(r["chosen"] != chosen for r in records):
-                raise ValueError("Fixed-pool refill choices differ across ranks")
-            return {g: deepcopy(pool[env_id]) for g, env_id in chosen.items()}
-
         def sage_generate(inputs, attempt):
             def audit(records):
                 if not self.accelerator.is_main_process:
@@ -228,9 +185,9 @@ def install_hint_resampling(trainer_class, gather):
 
         return refill_constant_groups(
             samples, sage_generate=sage_generate, gather=gather, group_size=self.num_generations,
-            max_attempts=int(os.environ.get("SPADE_MAX_ROLLOUT_ATTEMPTS", "2")),
-            min_valid_groups=int(os.environ.get("SPADE_MIN_VALID_GROUPS", "4")),
-            refill=refill, process_index=self.accelerator.process_index, metrics=metrics, audit=selection_audit)
+            max_attempts=1,  # SAGE never replaces an environment within this window.
+            min_valid_groups=int(os.environ.get("SPADE_MIN_VALID_GROUPS", "2")),
+            refill=None, process_index=self.accelerator.process_index, metrics=metrics, audit=selection_audit)
 
     infer._envduels_sage = True
     trainer_class._infer_single_or_multi_turn = infer

@@ -40,7 +40,7 @@ def reward(sample):
 
 
 def resample_with_hints(samples, *, generate, gather, group_size, hints_for, metrics=None, audit=None):
-    """Select the first successful whole group, or its last exhausted hint level.
+    """Retry an all-zero group once with the first author hint; retain whole groups.
 
     ``gather`` follows accelerate.gather_object's rank-ordered list concatenation.
     ``generate`` accepts uneven/empty local lists and returns one sample per input.
@@ -120,8 +120,8 @@ def resample_with_hints(samples, *, generate, gather, group_size, hints_for, met
     latest = dict(initial_rewards)
     selected_levels = [0] * len(groups)
     attempts = [[dict(hint_level=0, rewards=initial_rewards[g])] for g in range(len(groups))]
-    max_level = max(len(group[0]["hints"]) for group in groups)
-    for level in range(1, max_level + 1):
+    # One hinted retry, even when the export also provides a stronger hint_2.
+    for level in (1,):
         pending = {g for g in latest if not any(latest[g]) and level <= len(groups[g][0]["hints"])}
         if not pending:
             break

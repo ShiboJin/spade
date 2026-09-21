@@ -27,11 +27,11 @@ from spade.swift_backend.hint_resampling import SkipHintBatch
 from unittest.mock import patch
 
 
-SOURCE = '''
+SOURCE = r'''
 class Env:
     def __init__(self, max_turns): pass
     def reset(self, seed=None): return f"Problem {seed}. Choose an action.", {}
-    def step(self, action): return "Done", float(action == "WIN"), True, False, {}
+    def step(self, action): return "Done", float(action == r"\boxed{WIN}"), True, False, {}
 '''
 
 
@@ -159,14 +159,20 @@ def main():
         assert harness.rounds == 3
         assert all(s.rollout_infos["total_reward"] == 0 for s in outputs_eval)
         assert all("Player hint:" not in str(s.messages) for s in outputs_eval)
-        # Exhausted groups refill from other fixed-pool rows, with original rows intact.
+        # Even with other pool rows and a stale refill setting, never replace envs.
         harness.model.train()
         blocked = harness.to_samples([row("blocked")] * 4)
         for i, sample in enumerate(blocked):
             sample.request_id = f"blocked-{i}"
-        refilled = harness._infer_single_or_multi_turn(blocked, RequestConfig())
-        assert all(s.extra["env_config"]["env_id"] != "blocked" for s in refilled)
-        assert {s.rollout_infos["total_reward"] for s in refilled} == {0, 1}
+        before = harness.rounds
+        with patch.dict("os.environ", SPADE_MAX_ROLLOUT_ATTEMPTS="2"):
+            try:
+                harness._infer_single_or_multi_turn(blocked, RequestConfig())
+            except SkipHintBatch:
+                pass
+            else:
+                raise AssertionError("All-zero group must skip without environment refill")
+        assert harness.rounds == before + 2  # no hint, one hinted retry
         assert all("hint_level" not in r["env_config"] for r in harness.train_dataset)
         with patch.dict("os.environ", SPADE_MAX_ROLLOUT_ATTEMPTS="1", SPADE_MIN_VALID_GROUPS="2"):
             initial = deepcopy(batch) + deepcopy(blocked)
@@ -187,9 +193,9 @@ def main():
         except SkipHintBatch:
             pass
         else:
-            raise AssertionError("Unavailable refill must skip")
+            raise AssertionError("All-zero window must skip")
         print("PASS: real Swift Gym rollout, Qwen training encoding retains hint, masks hint loss, eval stays unhinted")
-        print("PASS: fixed-pool refill and bounded skip use the installed Swift sample/request interfaces")
+        print("PASS: no-refill selection and bounded skip use the installed Swift sample/request interfaces")
 
 
 if __name__ == "__main__":

@@ -94,7 +94,7 @@ def worker(rank, world, rendezvous):
     lengths = torch.tensor([1 + i % 3 for i in range(24)])
     mask = torch.arange(3)[None, :] < lengths[:, None]
     start, end = rank * 8, (rank+1)*8
-    for valid in (6, 5, 4, 3, 6):
+    for valid in (6, 5, 4, 3, 2, 1, 0, 6):
         initial = [s for g in range(6) for s in samples(f"env{g}")]
         rewards = torch.tensor([int(i % 4 == 0) if i//4 < valid else int(i//4 % 2)
                                 for i in range(24)], dtype=torch.float64)
@@ -107,12 +107,12 @@ def worker(rank, world, rendezvous):
         try:
             selected = refill_constant_groups(initial[start:end], sage_generate=generate,
                                               gather=gather_rows, group_size=4, max_attempts=1,
-                                              min_valid_groups=4, process_index=rank, refill=None)
+                                              min_valid_groups=2, process_index=rank, refill=None)
         except SkipHintBatch:
-            assert valid == 3
+            assert valid < 2
             assert gather_rows([True]) == [True]*world
             continue
-        assert valid >= 4
+        assert valid >= 2
         for beta in (0.0, 0.1):
             trainer.beta = beta
             ddp.zero_grad(set_to_none=True)
@@ -164,8 +164,8 @@ def worker(rank, world, rendezvous):
     assert torch.isfinite(trainer.compute_loss(ddp, raw))
     dist.barrier()
     if rank == 0:
-        print("PASS: 3 CPU DDP ranks: 24/20/16 valid trajectories match valid-only Swift GRPO loss and gradients")
-        print("PASS: fully masked rank contributes zero (including KL); 3/6 skips; subsequent full window and eval work")
+        print("PASS: 3 CPU DDP ranks: 24/20/16/12/8 valid trajectories match valid-only Swift GRPO loss and gradients")
+        print("PASS: fully masked rank contributes zero (including KL); 0–1 valid groups skip; subsequent full window and eval work")
     dist.destroy_process_group()
 
 

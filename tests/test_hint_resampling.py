@@ -79,13 +79,36 @@ class HintResamplingTests(unittest.TestCase):
         self.assertTrue(all(env_config(s)["hint_level"] == 0 for s in output[:4]))
         self.assertTrue(all("Player hint" not in s.messages[1]["content"] for s in output[:4]))
 
-    def test_graded_hints_escalate_and_exhaustion_is_finite(self):
+    def test_graded_hints_still_retry_only_once(self):
         for final in ([0, 1, 0, 0], [0]*4):
             generator = Generator({("graded", 0): [0]*4, ("graded", 1): [0]*4,
                                    ("graded", 2): final})
             output = self.run_sage(samples("graded"), generator)
-            self.assertEqual(len(generator.calls), 3)
-            self.assertTrue(all(env_config(s)["hint_level"] == 2 for s in output))
+            self.assertEqual(len(generator.calls), 2)
+            self.assertTrue(all(env_config(s)["hint_level"] == 1 for s in output))
+            self.assertEqual([s.rollout_infos["total_reward"] for s in output], [0]*4)
+
+    def test_no_refill_keeps_two_mixed_groups_after_one_hint_retry(self):
+        names = ("mixed", "rescued", "easy", "stillzero", "hintallone", "graded")
+        batch = [s for name in names for s in samples(name)]
+        generator = Generator({
+            ("mixed", 0): [1, 0, 0, 0],
+            ("rescued", 0): [0]*4, ("rescued", 1): [0, 1, 0, 0],
+            ("easy", 0): [1]*4,
+            ("stillzero", 0): [0]*4, ("stillzero", 1): [0]*4,
+            ("hintallone", 0): [0]*4, ("hintallone", 1): [1]*4,
+            ("graded", 0): [0]*4, ("graded", 1): [0]*4,
+            ("graded", 2): [1, 0, 0, 0],
+        })
+        output = refill_constant_groups(
+            batch, sage_generate=lambda rows, _: self.run_sage(rows, generator),
+            gather=lambda x: x, group_size=4, max_attempts=1, min_valid_groups=2,
+            refill=lambda *args: self.fail("Must not replace environments"))
+        self.assertEqual([len(call) for call in generator.calls], [24, 16])
+        self.assertEqual([s.rollout_infos["sage_valid_group"] for s in output], [True]*8 + [False]*16)
+        self.assertTrue(all(s.rollout_infos["sage_valid_groups"] == 2 for s in output))
+        self.assertEqual([env_config(s)["env_id"] for s in output],
+                         [env_config(s)["env_id"] for s in batch])
 
     def test_bad_group_or_nonbinary_reward_fails(self):
         for batch in (samples()[:3], samples()[:3] + samples("different")[:1]):

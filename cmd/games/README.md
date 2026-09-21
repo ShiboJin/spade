@@ -53,41 +53,41 @@ The fixed pool need not divide evenly by `num_games_per_rollout`. Swift/TRL's
 sampler drops the incomplete final generation batch after shuffling each pass;
 for example, 90 environments with 8 groups per batch produce 11 complete windows
 and omit 2 environments from that pass's initial sampling. The dataset stays
-intact for future passes and SAGE refill. With shuffling disabled, the same tail
+intact for future passes. With shuffling disabled, the same tail
 is omitted each pass. The pool must still contain at least one full batch.
 Dry-run/resolved configuration reports `sampled_environments_per_dataset_pass`
 and `dropped_environments_per_dataset_pass`; step counts use complete batches.
-These counts describe initial sampling, before hint rescue/refill or skips.
+These counts describe initial sampling, before hint rescue or skips.
 
 Each group has `trajectories_per_game` independent episodes with the same exported
 environment and fixed seed. Sampling starts without a hint. If every terminal
 reward is zero, resample the **entire group** using the author's hint from the
-manifest's `privileged.json`. Single-hint exports have levels 0/1; graded exports
-use 0, `hint_1`, then `hint_2`. Stop escalation at the first group with any success,
-or after the last available hint. Hints are player context only; environment
-execution and binary terminal rewards are unchanged. Selected hinted trajectories
-keep the hint in their user message throughout old/current-policy log-prob
-computation. The hint itself is not an assistant target.
+manifest's `privileged.json`, **once**, using the same environment and seed.
+For graded exports this uses `hint_1` only; it never escalates to `hint_2`.
+An unhinted all-1 group is discarded without retry. A mixed 0/1 group is retained.
+After the hinted retry, retain only mixed 0/1 groups; discard all-0/all-1 groups.
+There is **no replacement-environment refill**. Environments remain in the dataset
+for future windows/epochs. Swift's separate DAPO `dynamic_sample` loop is disabled.
 
-Discard any selected constant-reward group (all 0 or all 1, including an unhinted
-all-1 group), then refill its slots from other environments in the fixed dataset.
-Each replacement again starts without a hint. This does not remove environments
-from the pool or modify dataset rows. `max_rollout_attempts` bounds total group
-selection passes per batch, **including the initial pass**; each pass may visit
-all available hint levels. Swift's separate DAPO `dynamic_sample` loop is disabled
-while SAGE owns this refill process.
+Hints are player context only; environment execution and binary terminal rewards
+are unchanged. Selected hinted trajectories keep the hint in their user message
+throughout old/current-policy log-prob computation. The hint itself is not an
+assistant target. The adapter forwards the final action with its `\boxed{}`
+envelope intact, because exported environments parse that envelope themselves.
 
-The supplied training configs set `max_rollout_attempts: 2`: the initial pass
-plus **one additional refill pass**. Set `min_valid_groups: 4` to accept a smaller
-effective batch after that bounded refill (or when no other environments remain).
-With 6 requested groups and 4 trajectories/group:
+SAGE requires `max_rollout_attempts: 1` (one environment-selection pass; its
+all-zero groups may still have one hinted retry). Both supplied profiles and the
+launcher/plugin defaults use `min_valid_groups: 2`. Older/custom configs must
+set these values explicitly. With 6 requested groups and 4 trajectories/group:
 
 | Valid groups | Effective trajectories | Action |
 |---|---|---|
 | 6 | 24 | Update |
 | 5 | 20 | Update |
 | 4 | 16 | Update |
-| 0–3 | 0 | Skip window |
+| 3 | 12 | Update |
+| 2 | 8 | Update |
+| 0–1 | 0 | Skip window |
 
 Swift/FSDP retains the original physical batch slots and accumulation schedule.
 Invalid groups have an explicit whole-group mask: their completion tokens and
@@ -114,8 +114,9 @@ eval explicitly resets the hint level to zero.
 
 Inspect `checkpoint/v*/hint_resampling.jsonl` under each training run (the actual
 Trainer `output_dir`) for env/seed, hint hashes, per-level reward lists, selected
-levels, refill attempts, discarded groups, `batch_selection` events with valid
-and masked group IDs, and `skipped_update` events with reasons.
+levels, discarded groups, `batch_selection` events with valid
+and masked group IDs, and `skipped_update` events with reasons. Legacy
+`refill_attempt`/`refill_attempts` audit fields remain zero.
 `sage/*` metrics appear in normal Trainer logs and configured reporters (including
 W&B). `sage/skipped_update` is 1 for a skipped window and 0 for a completed training
 window; `sage/applied_update` is the complement. Log aggregation can average these
@@ -133,6 +134,7 @@ CPU verification in the unified runtime (no model weights loaded):
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_hint_resampling.py'
+python3 tests/envduels_action_smoke.py
 python3 tests/sage_runtime_smoke.py
 python3 tests/sage_effective_batch_smoke.py
 python3 tests/sage_swift_smoke.py

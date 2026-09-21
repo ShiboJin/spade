@@ -12,12 +12,14 @@ import unittest
 from scripts.prepare_envduels_swift import build_rows, stable_seed
 
 
-SOURCE = '''
+SOURCE = r'''
 class Env:
     def __init__(self, max_turns): self.turns = 0
     def reset(self, seed=None): self.turns = 0; return f"problem-{seed}", {"reset": True}
     def step(self, action):
         self.turns += 1
+        assert action.startswith("\\boxed{") and action.endswith("}"), action
+        action = action[len("\\boxed{"):-1]
         return ("done" if action == "WIN" else "try again",
                 1.0 if action == "WIN" else 0.0,
                 action == "WIN", False, {"action": action})
