@@ -40,6 +40,8 @@ class Harness:
     _colocate_multi_turn_infer = RolloutTrainerMixin._colocate_multi_turn_infer
     _postprocess_rollout_outputs = RolloutTrainerMixin._postprocess_rollout_outputs
     samples2requests = RolloutTrainerMixin.samples2requests
+    _has_teacher_explicit = RolloutTrainerMixin._has_teacher_explicit
+    _setup_teacher = RolloutTrainerMixin._setup_teacher
 
     def training_step(self, *args, **kwargs):
         raise AssertionError("This smoke never trains")
@@ -105,7 +107,11 @@ def main():
         harness.scale_rewards = "none"
         harness.use_liger_loss = False
         harness.kl_in_reward = False
-        harness._has_teacher = False
+        # Use real Swift initialization instead of hardcoding _has_teacher=False.
+        harness._setup_teacher()
+        assert harness._has_teacher is True
+        assert harness._has_teacher_explicit() is False
+        assert harness.teacher_model is None
         harness.chord_sft_iterator = None
         harness.use_gym_env = True
         harness.use_fast_infer = True
@@ -124,6 +130,18 @@ def main():
         batch = harness.to_samples([row("hard")] * 4)
         for i, sample in enumerate(batch):
             sample.request_id = f"sample-{i}"
+        for changes, expected in ((dict(teacher_prompt="privileged teacher input"), "teacher_input=True"),
+                                  (dict(teacher_images=[]), "teacher_input=True")):
+            unsupported = deepcopy(batch)
+            for key, value in changes.items():
+                setattr(unsupported[0], key, value)
+            try:
+                harness._infer_single_or_multi_turn(unsupported, RequestConfig())
+            except ValueError as exc:
+                assert expected in str(exc), str(exc)
+            else:
+                raise AssertionError("Actual teacher input must still be rejected")
+        assert harness.rounds == 0
         outputs = harness._infer_single_or_multi_turn(batch, RequestConfig())
         assert harness.rounds == 2
         assert [s.rollout_infos["total_reward"] for s in outputs] == [1, 0, 0, 0]

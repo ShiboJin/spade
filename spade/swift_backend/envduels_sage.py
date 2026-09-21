@@ -17,6 +17,43 @@ from spade.swift_backend.envduels_sage_loss import install_effective_batch_loss
 _SKIP_UPDATE_OWNERS = weakref.WeakKeyDictionary()
 
 
+def has_teacher_input(sample):
+    # Match OnPolicySample.build_teacher_view without mutating the trajectory.
+    return bool(getattr(sample, "teacher_prompt", None)) or any(
+        getattr(sample, key, None) is not None for key in ("teacher_images", "teacher_messages"))
+
+
+def runtime_conflicts(trainer, is_global_inputs=False):
+    """Report actual incompatible settings, not Swift's teacher capability flag."""
+    checks = [
+        ("is_global_inputs", is_global_inputs, False),
+        ("async_generate", getattr(trainer, "async_generate", False), False),
+        ("dynamic_num_samples", getattr(trainer, "dynamic_num_samples", False), False),
+        ("dynamic_sample", getattr(trainer, "dynamic_sample", False), False),
+        ("num_iterations", trainer.num_iterations, 1),
+        ("steps_per_generation", trainer.args.steps_per_generation, trainer.args.gradient_accumulation_steps),
+        ("loss_type", trainer.loss_type, "grpo"),
+        ("use_liger_loss", trainer.use_liger_loss, False),
+        ("kl_in_reward", trainer.kl_in_reward, False),
+        ("chord_sft_iterator", trainer.chord_sft_iterator is not None, False),
+        ("sequence_parallel_size", trainer.template.sequence_parallel_size, 1),
+        ("use_gym_env", trainer.use_gym_env, True),
+        ("vllm_mode", trainer.vllm_mode, "colocate"),
+    ]
+    conflicts = [f"{name}={actual!r} (required {expected!r})"
+                 for name, actual, expected in checks if actual != expected]
+    if trainer.scale_rewards not in ("none", "group"):
+        conflicts.append(f"scale_rewards={trainer.scale_rewards!r} (required 'none' or 'group')")
+    # Recent Swift sets _has_teacher=True even for plain reward GRPO: it means
+    # dynamic OPSD is available, and only activates when samples carry teacher input.
+    explicit = getattr(trainer, "_has_teacher_explicit", None)
+    if (explicit is not None and explicit()) or any(
+            getattr(trainer, key, None) is not None for key in ("_teacher_model", "teacher_model_server")) or (
+            getattr(trainer, "_teacher_use_disable_adapter", False) or getattr(trainer, "use_teacher_api", False)):
+        conflicts.append("explicit_teacher=True (required False)")
+    return conflicts
+
+
 def _guard_update_step(component, trainer):
     if component is None:
         return
@@ -111,20 +148,13 @@ def install_hint_resampling(trainer_class, gather):
             set_hint_level(sample, 0)
         if not self.model.training:
             return original(self, samples, request_config, is_global_inputs)
-        if (is_global_inputs or getattr(self, "async_generate", False)
-                or getattr(self, "dynamic_num_samples", False)
-                or getattr(self, "dynamic_sample", False)
-                or self.num_iterations != 1
-                or self.args.steps_per_generation != self.args.gradient_accumulation_steps
-                or self.loss_type != "grpo" or self.scale_rewards not in ("none", "group")
-                or self.use_liger_loss or self.kl_in_reward or self._has_teacher
-                or self.chord_sft_iterator is not None
-                or self.template.sequence_parallel_size != 1
-                or not self.use_gym_env or self.vllm_mode != "colocate"):
-            raise ValueError("EnvDuels SAGE requires synchronous colocated Gym GRPO, fixed group sizes, "
-                             "sequence_parallel_size=1, dynamic_sample=false, num_iterations=1 and "
-                             "steps_per_generation=gradient_accumulation_steps; masked effective batches "
-                             "require standard GRPO with group/none reward scaling and no teacher/CHORD/Liger/KL-in-reward")
+        conflicts = runtime_conflicts(self, is_global_inputs)
+        if any(has_teacher_input(sample) for sample in samples):
+            conflicts.append("teacher_input=True (teacher_prompt/images/messages are unsupported)")
+        # A conflict on one rank must stop all ranks before they enter rollout.
+        conflicts = sorted(set(gather(conflicts)))
+        if conflicts:
+            raise ValueError("EnvDuels SAGE incompatible runtime settings: " + "; ".join(conflicts))
 
         def metrics(values):
             for key, value in values.items():
@@ -144,6 +174,8 @@ def install_hint_resampling(trainer_class, gather):
                     pool = {}
                     for i in range(len(self.train_dataset)):
                         prototype = self.to_samples([self.train_dataset[i]])[0]
+                        if has_teacher_input(prototype):
+                            raise ValueError("SAGE refill dataset contains unsupported teacher input")
                         cfg = env_config(prototype)
                         if not isinstance(cfg, dict) or cfg["env_id"] in pool:
                             raise ValueError("SAGE refill requires one fixed dataset row per environment")

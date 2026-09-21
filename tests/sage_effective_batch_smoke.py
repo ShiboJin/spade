@@ -77,7 +77,9 @@ def worker(rank, world, rendezvous):
     trainer.reward_func_names = ["terminal"]
     trainer.dynamic_num_samples = False
     trainer.kl_in_reward = trainer.use_liger_loss = trainer.compute_entropy = False
-    trainer._has_teacher = trainer.use_teacher_api = trainer.overlong_filter = False
+    # Swift exposes dynamic OPSD capability even when no teacher input is present.
+    trainer._has_teacher = True
+    trainer.use_teacher_api = trainer.overlong_filter = False
     trainer.log_rollout_offpolicy_metrics = False
     trainer.rollout_importance_sampling_mode = None
     trainer.disable_rollout_importance_sampling = True
