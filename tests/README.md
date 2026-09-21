@@ -36,5 +36,39 @@ The default diagnostic exercises the low-memory path; the plugin also accepts
 the `SPADE_GRPO_*` environment settings described in
 [`configs/TRAINING.md`](../configs/TRAINING.md).
 
+`grpo_accumulation_parity_smoke.py` checks the A100 logprob path without an
+optimizer update. It caches old logps for ten different microbatches before
+accumulating their backward passes, disables dropout by default, checks adapter
+weights are unchanged, and fails if any logprob difference exceeds `0.125`.
+It writes rank-local measurements into one JSON report. Run in the same guarded
+container with four reserved GPUs:
+
+```bash
+python3 -m torch.distributed.run --nnodes=1 --master_addr=127.0.0.1 \
+  --master_port=29681 --nproc_per_node=4 tests/grpo_accumulation_parity_smoke.py \
+  --output outputs/logps_validation/tiny.json
+```
+
+Add `--model checkpoints/Qwen3.8-27B` for real weights. `--lengths` selects
+comma-separated sequence lengths; `--projection standard` and
+`--no-activation-checkpointing` isolate those paths. `--dropout` is an explicit
+control run; with freshly initialized zero LoRA B weights, dropout alone should
+not alter the model outputs. This synthetic check does not cover rollout
+tokenization, the full Swift trainer, or vLLM weight synchronization.
+
+`--rounds 2` repeats accumulation without updating parameters. To localize a
+failure, `--trace-layers --trace-on-gpu` samples intermediate activations without
+per-layer CPU synchronization; `--trace-filter` limits module names by regex.
+Instrumentation can change the timing/allocation pattern of intermittent errors,
+so also verify without tracing. `--deterministic` is an explicit diagnostic
+control, not a production default.
+
+For an exact replay, set `SPADE_LOGPS_SAVE_INPUTS=true` **inside the training
+container**. First-update diagnostics save rank-local, detached CPU tensor
+snapshots under `checkpoint/.../logps_inputs/`; pass that directory using
+`--replay-inputs`. These contain training inputs and should be treated as private
+run artifacts. `--replay-completions` instead re-tokenizes logged text, optionally
+left-truncating it with `--replay-max-length`; that is not an exact input replay.
+
 Generated games, API experiments, and one-off validation scripts belong under
 `scripts/` or an ignored output directory, not in this test suite.

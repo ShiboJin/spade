@@ -94,6 +94,7 @@ exec accelerate launch \
     --lora_rank "$LORA_RANK" \
     --lora_alpha "$LORA_ALPHA" \
     --target_modules all-linear \
+    --disable_dropout true \
     --torch_dtype bfloat16 \
     --attn_impl sdpa \
     --fsdp "$FSDP_CONFIG" \

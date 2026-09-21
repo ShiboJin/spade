@@ -4,15 +4,26 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import torch
 
 from spade.swift_backend.logps_diagnostics import (
-    input_fingerprint, install_logps_diagnostics, summarize_logps,
+    _snapshot_value, input_fingerprint, install_logps_diagnostics, summarize_logps,
 )
 
 
 class LogpsDiagnosticsTests(unittest.TestCase):
+    def test_snapshot_is_detached_independent_and_plain_data(self):
+        value = torch.ones(2, requires_grad=True)
+        snapshot = _snapshot_value({"nested": [value, (3, None, True)]})
+        self.assertFalse(snapshot["nested"][0].requires_grad)
+        with torch.no_grad():
+            value.zero_()
+        self.assertTrue(torch.equal(snapshot["nested"][0], torch.ones(2)))
+        with self.assertRaises(TypeError):
+            _snapshot_value(object())
+
     def test_scalar_fingerprints_preserve_value_shape_and_dtype(self):
         for dtype in (torch.int32, torch.int64, torch.float32, torch.bfloat16, torch.bool):
             with self.subTest(dtype=dtype):
@@ -78,13 +89,18 @@ class LogpsDiagnosticsTests(unittest.TestCase):
             trainer.beta = 0.
             trainer.importance_sampling_level = "token"
             trainer.rollout_importance_sampling_mode = None
+            trainer.temperature = .8
             batch = SimpleNamespace(old_per_token_logps=None, completion_mask=torch.ones(1, 2, dtype=torch.bool),
-                                    advantages=torch.tensor([[.75, .75]]))
+                                    advantages=torch.tensor([[.75, .75]]), logits_to_keep=2)
             # The real Swift model inputs also contain zero-dimensional Int
             # metadata. Exercise both old/no-grad and current/grad hook paths.
             inputs = {"input_ids": torch.tensor([[1, 2]]), "scalar_metadata": torch.tensor(2, dtype=torch.int32)}
-            with torch.no_grad():
+            with torch.no_grad(), patch.dict("os.environ", {"SPADE_LOGPS_SAVE_INPUTS": "true"}):
                 old, _ = trainer._get_per_token_logps_and_entropies(trainer.model, inputs, batch)
+            saved = torch.load(batch._spade_logps_snapshot_path, weights_only=True)
+            self.assertEqual(saved["input_hash"], input_fingerprint(saved["model_inputs"]))
+            self.assertTrue(torch.equal(saved["old_logps"], old))
+            self.assertEqual(saved["logits_to_keep"], 2)
             batch.old_per_token_logps = old
             current, _ = trainer._get_per_token_logps_and_entropies(trainer.model, inputs, batch)
             current.sum().backward()

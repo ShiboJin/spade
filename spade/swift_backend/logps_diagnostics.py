@@ -3,7 +3,22 @@ from functools import wraps
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
+
+
+def _snapshot_value(value):
+    """Copy only tensor/plain-data inputs so snapshots load with weights_only=True."""
+    import torch
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().clone()
+    if isinstance(value, dict):
+        return {key: _snapshot_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_snapshot_value(item) for item in value)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError(f"Unsupported logps snapshot input: {type(value).__name__}")
 
 
 def input_fingerprint(inputs):
@@ -73,6 +88,20 @@ def install_logps_diagnostics(trainer_class):
         # Old scoring happens before postprocessing, with no gradients.
         if old is None:
             grpo_batch._spade_old_input_hash = input_fingerprint(model_inputs)
+            # Opt-in debugging only: retain exact encoded inputs, not a lossy
+            # re-tokenization of logged prompt/completion strings.
+            if os.environ.get("SPADE_LOGPS_SAVE_INPUTS", "false").lower() == "true":
+                index = getattr(self, "_spade_logps_snapshot_index", 0)
+                self._spade_logps_snapshot_index = index + 1
+                directory = Path(self.args.output_dir) / "logps_inputs"
+                directory.mkdir(parents=True, exist_ok=True)
+                path = directory / f"rank{self.accelerator.process_index}.{index:04d}.pt"
+                torch.save(dict(model_inputs=_snapshot_value(model_inputs),
+                                logits_to_keep=grpo_batch.logits_to_keep,
+                                old_logps=_snapshot_value(result[0]),
+                                input_hash=grpo_batch._spade_old_input_hash,
+                                temperature=self.temperature), path)
+                grpo_batch._spade_logps_snapshot_path = str(path)
         elif torch.is_grad_enabled():
             mask = grpo_batch.completion_mask.clone()
             if self.overlong_filter and grpo_batch.truncated_mask is not None:
@@ -85,6 +114,7 @@ def install_logps_diagnostics(trainer_class):
                           importance_sampling_level=self.importance_sampling_level,
                           rollout_importance_sampling_mode=self.rollout_importance_sampling_mode,
                           input_matches_old=(old_hash == input_fingerprint(model_inputs)) if old_hash else None,
+                          input_snapshot=getattr(grpo_batch, "_spade_logps_snapshot_path", None),
                           samples=getattr(grpo_batch, "_spade_diagnostic_samples", []))
             path = Path(self.args.output_dir) / f"logps_diagnostics.rank{self.accelerator.process_index}.jsonl"
             with path.open("a") as stream:
