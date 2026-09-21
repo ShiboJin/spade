@@ -31,6 +31,7 @@ def main():
     parser.add_argument("--activation-checkpointing", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--decoder-checkpointing", action="store_true",
                         help="Use SPADE whole-decoder checkpointing instead of Accelerate submodule wrappers")
+    parser.add_argument("--fsdp-tail-norm", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--trace-layers", action="store_true")
     parser.add_argument("--trace-filter", default=".*", help="Regex selecting traced module names")
     parser.add_argument("--trace-on-gpu", action="store_true",
@@ -38,6 +39,7 @@ def main():
     parser.add_argument("--repeat-old", action="store_true")
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--rounds", type=int, default=1, help="Repeat accumulation without any parameter update")
+    parser.add_argument("--max-backwards", type=int, help="Stop after this many forwards/backwards (old scoring still covers all batches)")
     parser.add_argument("--max-logp-delta", type=float, default=0.125)
     parser.add_argument("--memory-limit-gib", type=int, default=160)
     parser.add_argument("--output", type=Path, required=True)
@@ -47,6 +49,8 @@ def main():
         parser.error("lengths must be >=64 and max-logp-delta nonnegative")
     if args.rounds < 1:
         parser.error("rounds must be positive")
+    if args.max_backwards is not None and args.max_backwards < 1:
+        parser.error("max-backwards must be positive")
     if args.replay_completions and (not args.model or args.replay_max_length < 2):
         parser.error("replay requires --model and replay-max-length >=2")
     if args.replay_inputs and (not args.model or args.replay_completions):
@@ -60,6 +64,7 @@ def main():
     os.environ["SPADE_GRPO_DECODER_CHECKPOINTING"] = str(args.decoder_checkpointing).lower()
     os.environ["SPADE_GRPO_CPU_ACTIVATION_OFFLOAD"] = "false"
     os.environ["SPADE_GRPO_CHECKPOINT_DELTA_RULE"] = "false"
+    os.environ["SPADE_GRPO_FSDP_TAIL_NORM"] = str(args.fsdp_tail_norm).lower()
     os.environ["ACCELERATE_USE_FSDP"] = "true"
     os.environ["FSDP_CPU_RAM_EFFICIENT_LOADING"] = str(bool(args.model)).lower()
 
@@ -130,6 +135,12 @@ def main():
         active_dropout = sum(isinstance(m, torch.nn.Dropout) and m.p > 0 for m in model.modules())
         checkpoint_wrappers = sum(isinstance(m, CheckpointWrapper) for m in model.modules())
         checkpoint_decoders = sum(bool(getattr(m, "_spade_checkpointed", False)) for m in model.modules())
+        final_norm = model.base_model.model.model.language_model.norm
+        head = model.get_output_embeddings()
+        tail_grouped = (hasattr(final_norm, "_get_fsdp_state") and
+                        final_norm._get_fsdp_state() is head._get_fsdp_state())
+        if args.fsdp_tail_norm:
+            assert tail_grouped, "Final norm was not grouped with the FSDP2 head"
         assert args.dropout or active_dropout == 0
         if args.activation_checkpointing:
             assert checkpoint_wrappers > 0 or checkpoint_decoders > 0, "Activation checkpointing was not installed"
@@ -188,6 +199,17 @@ def main():
                 batches.append((inputs, length - 32, tokens))
         trace = {}
         trace_differences = []
+        trace_records = []
+
+        def flush_trace():
+            for phase, (microbatch, name), maximum, mean in trace_differences:
+                if maximum.item() != 0:
+                    record = dict(event="layer_difference", rank=dist.get_rank(), phase=phase,
+                                  microbatch=microbatch, module=name, max_delta=maximum.item(),
+                                  mean_delta=mean.item())
+                    trace_records.append(record)
+                    print(json.dumps(record), flush=True)
+            trace_differences.clear()
         trace_state = {"phase": "old", "microbatch": 0}
         if args.trace_layers:
             def capture(name):
@@ -217,6 +239,7 @@ def main():
         print(json.dumps(dict(event="prepared", rank=dist.get_rank(), model=args.model or "tiny",
                               active_dropout=active_dropout, checkpoint_wrappers=checkpoint_wrappers,
                               checkpoint_decoders=checkpoint_decoders)), flush=True)
+        print(json.dumps(dict(event="tail_group", rank=dist.get_rank(), norm_and_head_grouped=tail_grouped)), flush=True)
         with torch.no_grad(), disable_gradient_checkpointing(model):
             for i, (inputs, keep, tokens) in enumerate(batches):
                 trace_state.update(phase="old", microbatch=i)
@@ -233,7 +256,10 @@ def main():
                     print(json.dumps(dict(event="old_repeat", rank=dist.get_rank(), microbatch=i,
                                           max_delta=(repeated.float() - old_logps[i].float()).abs().max().item())), flush=True)
         diagnostics = []
-        for step in range(len(batches) * args.rounds):
+        backward_steps = len(batches) * args.rounds
+        if args.max_backwards is not None:
+            backward_steps = min(backward_steps, args.max_backwards)
+        for step in range(backward_steps):
             i = step % len(batches)
             (inputs, keep, tokens), old = batches[i], old_logps[i]
             with accelerator.accumulate(model):
@@ -251,15 +277,12 @@ def main():
                                  first_old=old[0, 0].item(), first_new=current[0, 0].item())
                 diagnostics.append(stats)
                 print(json.dumps(dict(rank=dist.get_rank(), **stats)), flush=True)
+                flush_trace()
                 # Backpropagate a bounded objective without stepping the optimizer.
                 trace_state["phase"] = "backward"
                 accelerator.backward(-current.float().mean())
                 del current
-        for phase, (microbatch, name), maximum, mean in trace_differences:
-            if maximum.item() != 0:
-                print(json.dumps(dict(event="layer_difference", rank=dist.get_rank(), phase=phase,
-                                      microbatch=microbatch, module=name, max_delta=maximum.item(),
-                                      mean_delta=mean.item())), flush=True)
+        flush_trace()
         unchanged = all(torch.equal(initial_adapters[n], local(p).detach().cpu())
                         for n, p in model.named_parameters() if p.requires_grad)
         finite_grads = all(bool(torch.isfinite(local(p.grad)).all())
@@ -272,6 +295,8 @@ def main():
                       finite_grads=finite_grads, nonzero_grads=nonzero_grads,
                       active_dropout=active_dropout, checkpoint_wrappers=checkpoint_wrappers,
                       checkpoint_decoders=checkpoint_decoders,
+                      norm_and_head_grouped=tail_grouped,
+                      layer_differences=trace_records,
                       seconds=time.monotonic() - started, diagnostics=diagnostics)
         reports = [None] * dist.get_world_size()
         dist.all_gather_object(reports, report)

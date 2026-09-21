@@ -16,6 +16,7 @@ from torch import nn
 
 from spade.swift_backend.chunked_logps import chunked_linear_logps
 from spade.swift_backend.chunked_delta_rule import checkpointed_delta_rule
+from spade.swift_backend.fsdp_tail_norm import install_qwen_fsdp_tail_norm
 
 
 def install_delta_checkpointing():
@@ -179,6 +180,8 @@ def _enabled(name):
 
 
 def install_from_environment():
+    if _enabled("SPADE_GRPO_FSDP_TAIL_NORM"):
+        install_qwen_fsdp_tail_norm()
     decoder_checkpointing = _enabled("SPADE_GRPO_DECODER_CHECKPOINTING")
     offload_inputs = _enabled("SPADE_GRPO_CPU_ACTIVATION_OFFLOAD")
     if offload_inputs and not decoder_checkpointing:

@@ -70,6 +70,14 @@ GPU capacity alone does not change which attention implementation is installed.
 
 The plugins use the Qwen3.5, Accelerate and ms-swift interfaces in the pinned
 unified image. Recheck compatibility before changing those runtime versions.
+The GRPO plugin also corrects Accelerate 1.14's final-norm discovery for the
+nested Qwen3.5 language model, including its PEFT wrapper. This lets Accelerate
+place `model.language_model.norm` in its intended FSDP2 norm/output-head group
+instead of leaving it in the root group. Other model architectures retain
+Accelerate's original lookup. This fix is enabled by default; setting
+`SPADE_GRPO_FSDP_TAIL_NORM=false` inside the container disables it for diagnostic
+comparisons only. It does not change sequence truncation or the policy-ratio
+formula.
 Host RAM limits are independent of GPU memory: adjust `memory_limit_gib` and
 `host_memory_reserve_gib` to the destination machine's available host RAM.
 
