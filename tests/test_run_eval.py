@@ -10,9 +10,44 @@ from unittest.mock import patch
 
 from scripts.run_eval import ROOT, build_server_command, docker_command, load_config, load_dataset, score_dataset
 from scripts.benchmark_data import grade
+from scripts.run_eval import evaluation_resources, evaluation_preflight
+from scripts.memory_guard import launch_lock, GIB
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_eval_gpu_reservations_and_training_exclusion(self):
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.run_eval.evaluation_preflight") as check:
+            root = Path(directory)
+            first = self.config(gpu_ids=[0, 1], tensor_parallel=2)
+            second = self.config(gpu_ids=[2, 3], tensor_parallel=2)
+            with evaluation_resources(first, root):
+                with evaluation_resources(second, root):
+                    self.assertEqual(check.call_args.args[2], first["memory_limit_gib"])
+                    with self.assertRaisesRegex(RuntimeError, "GPU 1"):
+                        with evaluation_resources(self.config(gpu_ids=[1, 4], tensor_parallel=2), root):
+                            self.fail("overlap admitted")
+                    with self.assertRaises(RuntimeError):
+                        with launch_lock(root / ".spade-memory.lock"):
+                            self.fail("training admitted")
+            # Released reservations do not count, even though lock files persist.
+            with evaluation_resources(first, root):
+                self.assertEqual(check.call_args.args[2], 0)
+            with launch_lock(root / ".spade-memory.lock"):
+                with self.assertRaisesRegex(RuntimeError, "legacy"):
+                    with evaluation_resources(first, root):
+                        self.fail("eval admitted during training")
+
+    def test_eval_aggregate_memory_budget(self):
+        info = json.dumps(dict(MemoryLimit=True, SwapLimit=True, MemTotal=252 * GIB))
+        with patch("scripts.run_eval.subprocess.check_output", side_effect=[info, ""]), patch(
+                "scripts.run_eval.memory_available", return_value=180 * GIB):
+            evaluation_preflight(80, 48, 80, 229)
+        for available, capacity in [(120, 229), (229, 200)]:
+            with patch("scripts.run_eval.subprocess.check_output", return_value=info), patch(
+                    "scripts.run_eval.memory_available", return_value=available * GIB):
+                with self.assertRaisesRegex(RuntimeError, "Not enough"):
+                    evaluation_preflight(80, 48, 80, capacity)
+
     def config(self, **overrides):
         return load_config(ROOT / "configs/evaluation.json", overrides)
 
@@ -66,7 +101,7 @@ class EvaluationTests(unittest.TestCase):
                 load_config(path)
 
     def test_external_paths_mounted_and_relative_paths_stable(self):
-        cfg = self.config(checkpoint="/tmp/external model", data="/tmp/tests.jsonl")
+        cfg = self.config(checkpoint="/tmp/external model", data="/tmp/tests.jsonl", memory_limit_gib=96)
         command = docker_command(cfg, Path("/tmp/eval output"), "test-evaluation")
         self.assertEqual(command[command.index("--memory") + 1], "96g")
         self.assertEqual(command[command.index("--memory-swap") + 1], "96g")
