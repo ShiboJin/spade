@@ -48,6 +48,21 @@ class EvaluationTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Not enough"):
                     evaluation_preflight(80, 48, 80, capacity)
 
+    def test_eval_container_labels_filtered_in_python(self):
+        info = json.dumps(dict(MemoryLimit=True, SwapLimit=True, MemTotal=252 * GIB))
+        for listing, blocked in [("eval-a\ttrue\neval-b\ttrue\n", False),
+                                 ("eval-a\ttrue\ntrain-a\t\n", True),
+                                 ("old-eval\tfalse\n", True)]:
+            with self.subTest(listing=listing), patch(
+                    "scripts.run_eval.subprocess.check_output", side_effect=[info, listing]) as command, patch(
+                    "scripts.run_eval.memory_available", return_value=229 * GIB):
+                if blocked:
+                    with self.assertRaisesRegex(RuntimeError, "legacy guarded"):
+                        evaluation_preflight(80, 48, 0, 229)
+                else:
+                    evaluation_preflight(80, 48, 0, 229)
+                self.assertNotIn("label!=spade.eval-concurrent=true", command.call_args.args[0])
+
     def config(self, **overrides):
         return load_config(ROOT / "configs/evaluation.json", overrides)
 

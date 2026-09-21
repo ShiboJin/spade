@@ -99,12 +99,17 @@ def evaluation_preflight(limit_gib, reserve_gib, reserved_gib, capacity_gib):
         raise RuntimeError(
             f"Not enough host RAM: {available:.1f} GiB available; need {limit_gib} GiB new eval "
             f"+ {reserved_gib:g} GiB other eval budgets + {reserve_gib} GiB host reserve")
-    active = subprocess.check_output(
+    containers = subprocess.check_output(
         ["docker", "ps", "--filter", "label=spade.memory-guard=true",
-         "--filter", "label!=spade.eval-concurrent=true", "--format", "{{.Names}}"],
+         "--format", '{{.Names}}\t{{.Label "spade.eval-concurrent"}}'],
         text=True, timeout=15).strip()
+    active = []
+    for line in containers.splitlines():
+        name, _, concurrent = line.partition("\t")
+        if concurrent != "true":
+            active.append(name)
     if active:
-        raise RuntimeError(f"A training or legacy guarded container is running: {active}")
+        raise RuntimeError(f"A training or legacy guarded container is running: {', '.join(active)}")
 
 
 def write_json(path, value):
