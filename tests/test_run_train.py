@@ -305,7 +305,8 @@ class TrainingLauncherTests(unittest.TestCase):
         self.assertIn('--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT"', script)
         self.assertIn('--fsdp "$FSDP_CONFIG"', script)
         self.assertIn('--move_model_batches "$MOVE_MODEL_BATCHES"', script)
-        self.assertIn("--disable_dropout true", script)
+        self.assertIn("--lora_dropout 0", script)
+        self.assertNotIn("--disable_dropout", script)
         for flag, env in (("vllm_enforce_eager", "VLLM_ENFORCE_EAGER"),
                           ("sleep_level", "SLEEP_LEVEL"), ("offload_model", "OFFLOAD_MODEL"),
                           ("offload_optimizer", "OFFLOAD_OPTIMIZER")):
