@@ -31,7 +31,6 @@ def main():
     parser.add_argument("--activation-checkpointing", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--decoder-checkpointing", action="store_true",
                         help="Use SPADE whole-decoder checkpointing instead of Accelerate submodule wrappers")
-    parser.add_argument("--fsdp-tail-norm", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--trace-layers", action="store_true")
     parser.add_argument("--trace-filter", default=".*", help="Regex selecting traced module names")
     parser.add_argument("--trace-on-gpu", action="store_true",
@@ -40,6 +39,10 @@ def main():
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--rounds", type=int, default=1, help="Repeat accumulation without any parameter update")
     parser.add_argument("--max-backwards", type=int, help="Stop after this many forwards/backwards (old scoring still covers all batches)")
+    parser.add_argument("--gradient-accumulation-steps", type=int,
+                        help="Override accumulation length for a shortened diagnostic")
+    parser.add_argument("--sync-after-backward", action="store_true",
+                        help="Synchronize CUDA after each backward to diagnose FSDP async lifetime races")
     parser.add_argument("--max-logp-delta", type=float, default=0.125)
     parser.add_argument("--memory-limit-gib", type=int, default=160)
     parser.add_argument("--output", type=Path, required=True)
@@ -51,6 +54,8 @@ def main():
         parser.error("rounds must be positive")
     if args.max_backwards is not None and args.max_backwards < 1:
         parser.error("max-backwards must be positive")
+    if args.gradient_accumulation_steps is not None and args.gradient_accumulation_steps < 1:
+        parser.error("gradient-accumulation-steps must be positive")
     if args.replay_completions and (not args.model or args.replay_max_length < 2):
         parser.error("replay requires --model and replay-max-length >=2")
     if args.replay_inputs and (not args.model or args.replay_completions):
@@ -64,7 +69,9 @@ def main():
     os.environ["SPADE_GRPO_DECODER_CHECKPOINTING"] = str(args.decoder_checkpointing).lower()
     os.environ["SPADE_GRPO_CPU_ACTIVATION_OFFLOAD"] = "false"
     os.environ["SPADE_GRPO_CHECKPOINT_DELTA_RULE"] = "false"
-    os.environ["SPADE_GRPO_FSDP_TAIL_NORM"] = str(args.fsdp_tail_norm).lower()
+    # Keep the production training-step synchronization opt-in in this direct
+    # forward/backward diagnostic so --sync-after-backward remains an A/B switch.
+    os.environ["SPADE_GRPO_FSDP_SYNC"] = "false"
     os.environ["ACCELERATE_USE_FSDP"] = "true"
     os.environ["FSDP_CPU_RAM_EFFICIENT_LOADING"] = str(bool(args.model)).lower()
 
@@ -85,11 +92,12 @@ def main():
         from trl.trainer import disable_dropout_in_model
         from swift.trainers import disable_gradient_checkpointing
         from spade.swift_backend import fsdp_ram_loader  # noqa: F401
-        from spade.swift_backend.memory_efficient_grpo import GRPOTrainer
+        from spade.swift_backend.memory_efficient_grpo import GRPOTrainer, synchronize_qwen_fsdp
         from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointWrapper
 
         accelerator = Accelerator(
-            mixed_precision="bf16", gradient_accumulation_steps=len(lengths),
+            mixed_precision="bf16",
+            gradient_accumulation_steps=args.gradient_accumulation_steps or len(lengths),
             fsdp_plugin=FullyShardedDataParallelPlugin(
                 fsdp_version=2, auto_wrap_policy="transformer_based_wrap",
                 transformer_cls_names_to_wrap=["Qwen3_5DecoderLayer"],
@@ -135,12 +143,6 @@ def main():
         active_dropout = sum(isinstance(m, torch.nn.Dropout) and m.p > 0 for m in model.modules())
         checkpoint_wrappers = sum(isinstance(m, CheckpointWrapper) for m in model.modules())
         checkpoint_decoders = sum(bool(getattr(m, "_spade_checkpointed", False)) for m in model.modules())
-        final_norm = model.base_model.model.model.language_model.norm
-        head = model.get_output_embeddings()
-        tail_grouped = (hasattr(final_norm, "_get_fsdp_state") and
-                        final_norm._get_fsdp_state() is head._get_fsdp_state())
-        if args.fsdp_tail_norm:
-            assert tail_grouped, "Final norm was not grouped with the FSDP2 head"
         assert args.dropout or active_dropout == 0
         if args.activation_checkpointing:
             assert checkpoint_wrappers > 0 or checkpoint_decoders > 0, "Activation checkpointing was not installed"
@@ -239,7 +241,6 @@ def main():
         print(json.dumps(dict(event="prepared", rank=dist.get_rank(), model=args.model or "tiny",
                               active_dropout=active_dropout, checkpoint_wrappers=checkpoint_wrappers,
                               checkpoint_decoders=checkpoint_decoders)), flush=True)
-        print(json.dumps(dict(event="tail_group", rank=dist.get_rank(), norm_and_head_grouped=tail_grouped)), flush=True)
         with torch.no_grad(), disable_gradient_checkpointing(model):
             for i, (inputs, keep, tokens) in enumerate(batches):
                 trace_state.update(phase="old", microbatch=i)
@@ -281,6 +282,8 @@ def main():
                 # Backpropagate a bounded objective without stepping the optimizer.
                 trace_state["phase"] = "backward"
                 accelerator.backward(-current.float().mean())
+                if args.sync_after_backward:
+                    assert synchronize_qwen_fsdp(model, accelerator)
                 del current
         flush_trace()
         unchanged = all(torch.equal(initial_adapters[n], local(p).detach().cpu())
@@ -295,7 +298,6 @@ def main():
                       finite_grads=finite_grads, nonzero_grads=nonzero_grads,
                       active_dropout=active_dropout, checkpoint_wrappers=checkpoint_wrappers,
                       checkpoint_decoders=checkpoint_decoders,
-                      norm_and_head_grouped=tail_grouped,
                       layer_differences=trace_records,
                       seconds=time.monotonic() - started, diagnostics=diagnostics)
         reports = [None] * dist.get_world_size()

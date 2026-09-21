@@ -63,11 +63,11 @@ Instrumentation can change the timing/allocation pattern of intermittent errors,
 so also verify without tracing. `--deterministic` is an explicit diagnostic
 control, not a production default.
 
-The Qwen FSDP2 final-norm discovery fix is enabled by default. The diagnostic
-asserts that the nested language-model final norm and output head share the
-same FSDP state. `--no-fsdp-tail-norm` disables the fix for a control run;
-`--max-backwards 2` limits backward passes while still caching all old scores,
-which is useful for isolating failures after the first backward.
+The production plugin synchronizes asynchronous Qwen FSDP work between
+accumulated backwards. The direct diagnostic leaves that behavior disabled so
+`--sync-after-backward` provides an explicit A/B control. `--max-backwards 2`
+limits backward passes while still caching all old scores, which is useful for
+isolating failures after the first backward.
 
 For an exact replay, set `SPADE_LOGPS_SAVE_INPUTS=true` **inside the training
 container**. First-update diagnostics save rank-local, detached CPU tensor

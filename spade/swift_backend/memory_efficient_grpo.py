@@ -4,6 +4,7 @@ Uses ms-swift's existing FSDP-aware forward redirection (also used by its Liger
 path). The root FSDP forward/backward hooks must run around the backbone and
 the output projection; calling the unwrapped backbone alone is not sufficient.
 """
+from functools import wraps
 import os
 
 from accelerate.utils import is_peft_model
@@ -16,7 +17,6 @@ from torch import nn
 
 from spade.swift_backend.chunked_logps import chunked_linear_logps
 from spade.swift_backend.chunked_delta_rule import checkpointed_delta_rule
-from spade.swift_backend.fsdp_tail_norm import install_qwen_fsdp_tail_norm
 
 
 def install_delta_checkpointing():
@@ -172,6 +172,35 @@ def install_chunked_grpo_logps(*, chunk_size=128):
     get_logger().info("Enabled Qwen GRPO projection/log-softmax in %s-token chunks", chunk_size)
 
 
+def synchronize_qwen_fsdp(model, accelerator):
+    """Finish asynchronous FSDP work before the next accumulated forward."""
+    if not torch.cuda.is_available() or getattr(accelerator.state, "fsdp_plugin", None) is None:
+        return False
+    unwrapped = accelerator.unwrap_model(model)
+    base = unwrapped.base_model.model if is_peft_model(unwrapped) else unwrapped
+    if getattr(getattr(base, "config", None), "model_type", None) != "qwen3_5":
+        return False
+    torch.cuda.synchronize()
+    return True
+
+
+def install_fsdp_accumulation_sync(trainer_class=GRPOTrainer):
+    original = trainer_class.training_step
+    if getattr(original, "_spade_fsdp_accumulation_sync", False):
+        return
+
+    @wraps(original)
+    def training_step(self, model, *args, **kwargs):
+        result = original(self, model, *args, **kwargs)
+        if not self.accelerator.sync_gradients:
+            synchronize_qwen_fsdp(model, self.accelerator)
+        return result
+
+    training_step._spade_fsdp_accumulation_sync = True
+    trainer_class.training_step = training_step
+    get_logger().info("Enabled Qwen FSDP synchronization between accumulated backwards")
+
+
 def _enabled(name):
     value = os.environ.get(name, "true").lower()
     if value not in ("true", "false"):
@@ -180,8 +209,8 @@ def _enabled(name):
 
 
 def install_from_environment():
-    if _enabled("SPADE_GRPO_FSDP_TAIL_NORM"):
-        install_qwen_fsdp_tail_norm()
+    if _enabled("SPADE_GRPO_FSDP_SYNC"):
+        install_fsdp_accumulation_sync()
     decoder_checkpointing = _enabled("SPADE_GRPO_DECODER_CHECKPOINTING")
     offload_inputs = _enabled("SPADE_GRPO_CPU_ACTIVATION_OFFLOAD")
     if offload_inputs and not decoder_checkpointing:
