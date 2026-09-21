@@ -19,6 +19,9 @@ from scripts.memory_guard import verify_container_limits
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--diagnose-logps", action="store_true",
+                        help="Compare old/new logps without applying an optimizer update")
+    parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--length", type=int, default=16384)
     parser.add_argument("--microbatches", type=int, default=3)
     parser.add_argument("--reentrant-checkpoint", action="store_true",
@@ -80,7 +83,7 @@ def main():
         reserve_bytes = int((args.reserve_gib + (args.rank0_extra_reserve_gib if dist.get_rank() == 0 else 0)) * 1024**3)
         reserve = torch.empty(reserve_bytes, dtype=torch.uint8, device=accelerator.device)
         trainer = SimpleNamespace(accelerator=accelerator, args=SimpleNamespace(report_to=[]),
-            is_multimodal=True, model_kwarg_keys={"use_cache", "logits_to_keep"}, temperature=0.6)
+            is_multimodal=True, model_kwarg_keys={"use_cache", "logits_to_keep"}, temperature=args.temperature)
         trainer._get_last_hidden_state = MethodType(GRPOTrainer._get_last_hidden_state, trainer)
         tokens = torch.randint(100, 10000, (1, args.length), device=accelerator.device)
         inputs = {"input_ids": tokens, "attention_mask": torch.ones_like(tokens), "use_cache": False}
@@ -88,18 +91,27 @@ def main():
         torch.cuda.reset_peak_memory_stats()
         started = time.monotonic()
         print(f"rank {dist.get_rank()}: prepared model; starting {args.length}-token old logps", flush=True)
-        with torch.no_grad():
+        from swift.trainers import disable_gradient_checkpointing
+        with torch.no_grad(), disable_gradient_checkpointing(model):
             old, _ = GRPOTrainer._get_logps_via_local_forward(trainer, model, inputs, keep, tokens)
         assert torch.isfinite(old).all()
-        if args.reentrant_checkpoint:
+        if args.reentrant_checkpoint and not args.diagnose_logps:
             guarded = [m for m in model.modules() if getattr(m, "_spade_checkpointed", False)]
             assert guarded and all(not m.gradient_checkpointing for m in guarded)
         print(f"rank {dist.get_rank()}: old logps passed", flush=True)
+        diagnostics = []
         for step in range(args.microbatches):
             with accelerator.accumulate(model):
                 logps, _ = GRPOTrainer._get_logps_via_local_forward(trainer, model, inputs, keep, tokens)
                 print(f"rank {dist.get_rank()}: training forward {step + 1} passed", flush=True)
-                ratio = (logps - old).exp()
+                delta = logps.float() - old.float()
+                ratio = delta.exp()
+                diagnostic = dict(microbatch=step, old_dtype=str(old.dtype), new_dtype=str(logps.dtype),
+                                  delta_abs_max=delta.abs().max().item(),
+                                  delta_abs_mean=delta.abs().mean().item(), ratio_max=ratio.max().item(),
+                                  ratio_mean=ratio.mean().item())
+                diagnostics.append(diagnostic)
+                print(f"rank {dist.get_rank()}: logps parity {diagnostic}", flush=True)
                 advantage = 0.5 if dist.get_rank() % 2 else -0.5
                 loss = -torch.minimum(ratio * advantage, ratio.clamp(0.8, 1.28) * advantage).mean()
                 assert torch.isfinite(loss)
@@ -112,13 +124,15 @@ def main():
                 assert torch.isfinite(grad).all()
                 nonzero = nonzero or bool(grad.count_nonzero())
         assert nonzero, "no nonzero adapter gradients"
-        optimizer.step()
+        if not args.diagnose_logps:
+            optimizer.step()
         torch.cuda.synchronize()
         report = {"rank": dist.get_rank(), "length": args.length, "microbatches": args.microbatches,
                   "reserved_headroom_gib": reserve.numel() / 1024**3,
                   "peak_allocated_gib": torch.cuda.max_memory_allocated() / 1024**3,
                   "peak_reserved_gib": torch.cuda.max_memory_reserved() / 1024**3,
-                  "seconds": time.monotonic() - started, "status": "passed"}
+                  "seconds": time.monotonic() - started, "status": "passed", "logps_diagnostics": diagnostics,
+                  "optimizer_updated": not args.diagnose_logps}
         reports = [None] * dist.get_world_size()
         dist.all_gather_object(reports, report)
         if dist.get_rank() == 0:

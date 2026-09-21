@@ -20,7 +20,6 @@
     "dataset_shuffle": true,
     "remove_constant_reward_groups": false,
     "max_rollout_attempts": 1,
-    "min_valid_groups": 2,
 
     "learning_rate": 1e-6,
     "warmup_ratio": 0.03,

@@ -43,7 +43,6 @@ FIELDS = {
 MEMORY_DEFAULTS = {"memory_limit_gib": 160, "host_memory_reserve_gib": DEFAULT_RESERVE_GIB}
 ROLLOUT_DEFAULTS = {
     "sage_hint_resampling": True,
-    "min_valid_groups": 2,
     "vllm_enforce_eager": True,
     "sleep_level": 2,
     "offload_model": True,
@@ -89,6 +88,8 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
     if not isinstance(document["training"], dict) or not isinstance(document["accelerate"], dict):
         raise ValueError("training and accelerate must be mappings")
     cfg = {**MEMORY_DEFAULTS, **GRPO_MEMORY_DEFAULTS, **ROLLOUT_DEFAULTS, **document["training"]}
+    # Compatibility with older configs: SAGE now trains every full batch.
+    cfg.pop("min_valid_groups", None)
     missing = FIELDS - cfg.keys()
     unknown = cfg.keys() - (FIELDS | MEMORY_DEFAULTS.keys() | GRPO_MEMORY_DEFAULTS.keys() | ROLLOUT_DEFAULTS.keys())
     if missing:
@@ -121,7 +122,7 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
     positive_ints = (
         "fixed_pool_epochs", "num_games_per_rollout", "trajectories_per_game",
         "batch_size", "per_device_train_batch_size", "num_substeps",
-        "max_rollout_attempts", "min_valid_groups", "lora_rank", "lora_alpha", "max_turns",
+        "max_rollout_attempts", "lora_rank", "lora_alpha", "max_turns",
         "max_context_length", "actor_max_tokens", "vllm_tensor_parallel",
         "actor_top_k", "save_every", "save_total_limit", "move_model_batches", "grpo_logps_chunk_size",
     )
@@ -140,11 +141,9 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
         if type(cfg[key]) is not bool:
             raise ValueError(f"{key} must be a boolean")
     if cfg["sage_hint_resampling"] and cfg["num_substeps"] != 1:
-        raise ValueError("sage_hint_resampling requires num_substeps=1 for whole-window skipping")
+        raise ValueError("sage_hint_resampling requires num_substeps=1 for one-pass SAGE rollouts")
     if cfg["sage_hint_resampling"] and cfg["max_rollout_attempts"] != 1:
         raise ValueError("sage_hint_resampling requires max_rollout_attempts=1 (no environment refill)")
-    if cfg["sage_hint_resampling"] and cfg["min_valid_groups"] > cfg["num_games_per_rollout"]:
-        raise ValueError("min_valid_groups must not exceed num_games_per_rollout")
     if type(cfg["sleep_level"]) is not int or cfg["sleep_level"] not in (0, 1, 2):
         raise ValueError("sleep_level must be an integer in {0, 1, 2}")
     if cfg["grpo_cpu_activation_offload"] and not cfg["grpo_decoder_checkpointing"]:
@@ -365,7 +364,6 @@ def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[
         "DYNAMIC_SAMPLE": str(cfg["remove_constant_reward_groups"] and not cfg["sage_hint_resampling"]).lower(),
         "SPADE_SAGE_HINT_RESAMPLING": str(cfg["sage_hint_resampling"]).lower(),
         "SPADE_MAX_ROLLOUT_ATTEMPTS": cfg["max_rollout_attempts"],
-        "SPADE_MIN_VALID_GROUPS": cfg["min_valid_groups"],
         "MAX_RESAMPLE_TIMES": cfg["max_rollout_attempts"],
         "OVERLONG_FILTER": str(cfg["overlong_filter"]).lower(),
         "LOG_COMPLETIONS": str(cfg["rollout_json_export"]).lower(),

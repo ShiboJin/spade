@@ -57,15 +57,15 @@ intact for future passes. With shuffling disabled, the same tail
 is omitted each pass. The pool must still contain at least one full batch.
 Dry-run/resolved configuration reports `sampled_environments_per_dataset_pass`
 and `dropped_environments_per_dataset_pass`; step counts use complete batches.
-These counts describe initial sampling, before hint rescue or skips.
+These counts describe initial sampling, before hint rescue.
 
 Each group has `trajectories_per_game` independent episodes with the same exported
 environment and fixed seed. Sampling starts without a hint. If every terminal
 reward is zero, resample the **entire group** using the author's hint from the
 manifest's `privileged.json`, **once**, using the same environment and seed.
 For graded exports this uses `hint_1` only; it never escalates to `hint_2`.
-An unhinted all-1 group is discarded without retry. A mixed 0/1 group is retained.
-After the hinted retry, retain only mixed 0/1 groups; discard all-0/all-1 groups.
+An unhinted all-1 group is retained without retry. A mixed 0/1 group is retained.
+After the hinted retry, retain every resulting group, including all-0/all-1 groups.
 There is **no replacement-environment refill**. Environments remain in the dataset
 for future windows/epochs. Swift's separate DAPO `dynamic_sample` loop is disabled.
 
@@ -76,59 +76,38 @@ assistant target. The adapter forwards the final action with its `\boxed{}`
 envelope intact, because exported environments parse that envelope themselves.
 
 SAGE requires `max_rollout_attempts: 1` (one environment-selection pass; its
-all-zero groups may still have one hinted retry). Both supplied profiles and the
-launcher/plugin defaults use `min_valid_groups: 2`. Older/custom configs must
-set these values explicitly. With 6 requested groups and 4 trajectories/group:
+all-zero groups may still have one hinted retry). The retired `min_valid_groups`
+setting is ignored, including in older configs and environment variables.
 
-| Valid groups | Effective trajectories | Action |
-|---|---|---|
-| 6 | 24 | Update |
-| 5 | 20 | Update |
-| 4 | 16 | Update |
-| 3 | 12 | Update |
-| 2 | 8 | Update |
-| 0–1 | 0 | Skip window |
-
-Swift/FSDP retains the original physical batch slots and accumulation schedule.
-Invalid groups have an explicit whole-group mask: their completion tokens and
-advantages are masked out of the loss, including any KL term. GRPO is normalized
-by the actual valid trajectory count, not the padded slot count. All ranks agree
-on the selected groups; a rank containing only masked slots still participates in
-forward/backward collectives with zero loss contribution. Thus a partial update
-can still consume compute for the masked slots.
-
-Below the threshold, skip the entire window: no backward, optimizer step, AdamW
-weight decay/momentum update, or learning-rate scheduler step. Continue to the
-next window; no cross-window cache and no constant-reward fallback. Environments
-are never permanently removed from the fixed pool.
+Every batch follows the normal backward, optimizer and LR scheduler path,
+including batches with zero or one mixed-reward group. There is no SAGE group
+mask and no effective-batch rescaling: GRPO averages over the full batch.
+With 10 groups and only one mixed group, its policy gradient is diluted by 10
+relative to averaging over that group alone. Constant groups have zero centered
+reward advantage; with beta=0 an entirely constant batch has no policy-gradient
+signal, but optimizer momentum/weight decay and the scheduler still run.
+Standard prompt/padding/overlong token masks remain in effect.
 
 Supported runtime: synchronous ms-swift colocated Gym GRPO, fixed group sizes,
 no sequence parallelism, `num_substeps=1`, and one generation batch per complete
 gradient-accumulation window (`steps_per_generation=gradient_accumulation_steps`).
-Effective batch masking supports standard `loss_type=grpo`, group/none reward
+The integration supports standard `loss_type=grpo`, group/none reward
 scaling, and no Liger, teacher, CHORD or KL-in-reward path. Ordinary KL loss is
-supported and masked along with policy loss.
+supported for constant groups as well.
 Decisions are shared across training ranks; even ranks without local retry samples
 join collectives. Existing evaluation entrypoints stay no-hint, and in-training
 eval explicitly resets the hint level to zero.
 
 Inspect `checkpoint/v*/hint_resampling.jsonl` under each training run (the actual
 Trainer `output_dir`) for env/seed, hint hashes, per-level reward lists, selected
-levels, discarded groups, `batch_selection` events with valid
-and masked group IDs, and `skipped_update` events with reasons. Legacy
-`refill_attempt`/`refill_attempts` audit fields remain zero.
-`sage/*` metrics appear in normal Trainer logs and configured reporters (including
-W&B). `sage/skipped_update` is 1 for a skipped window and 0 for a completed training
-window; `sage/applied_update` is the complement. Log aggregation can average these
-values over multiple windows. Trainer `global_step`, checkpoint cadence and the
-configured training duration still count consumed windows, including skips;
-they do not count only actual optimizer updates. Skips do not extend training.
-`sage/valid_groups`, `sage/effective_trajectories`, `sage/masked_groups` and
-`sage/partial_batch` show effective batch sizes. `sage/effective_reward` measures
-only the valid trajectories used by the update. Swift's ordinary rollout/reward
-logs still include the masked physical slots; use the SAGE selection records and
-effective metrics to distinguish them. Neither training reward is a no-hint
-evaluation score.
+levels, constant-reward groups, and `batch_selection` events with all groups
+accepted. `discarded_groups`, `masked_groups`, `partial_batch`, and
+`refill_attempts` are zero. `sage/valid_groups` counts mixed-reward groups for
+monitoring only. `sage/effective_trajectories` counts the entire retained batch
+(before standard overlong filtering), and `sage/effective_reward` averages it.
+`sage/skipped_update=0` and `sage/applied_update=1` denote normal completed
+training windows; they do not guarantee a nonzero reward gradient or parameter
+change. Training rewards include hinted trajectories and are not no-hint eval.
 
 CPU verification in the unified runtime (no model weights loaded):
 

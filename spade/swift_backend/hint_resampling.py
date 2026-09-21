@@ -170,25 +170,32 @@ def resample_with_hints(samples, *, generate, gather, group_size, hints_for, met
 
 
 def refill_constant_groups(samples, *, sage_generate, gather, group_size, max_attempts,
-                           refill, process_index=0, metrics=None, min_valid_groups=None, audit=None):
+                           refill, process_index=0, metrics=None, min_valid_groups=None, audit=None,
+                           keep_constant_groups=False):
     """Fill the original batch slots with complete nonconstant-reward groups.
 
     Each attempt is a no-hint-first SAGE pass. max_attempts includes the initial
     pass. At exhaustion, accept at least min_valid_groups (default: all groups).
     Preserve physical slots, marking invalid groups with zero training weight.
     Below the threshold, raise SkipHintBatch on every rank. No cross-window cache.
+    With keep_constant_groups=True, retain every group, never skip or refill,
+    and report mixed groups only as diagnostics. No loss normalization is implied.
     ``refill`` receives all failed group IDs and current group env IDs, and returns
     one fresh sample prototype per failed group, identically on every rank.
     """
     if type(max_attempts) is not int or max_attempts < 1:
         raise ValueError("max_rollout_attempts must be positive")
+    if keep_constant_groups and max_attempts != 1:
+        raise ValueError("Keeping constant groups requires max_attempts=1")
     lengths = gather([len(samples)])
     if not sum(lengths) or sum(lengths) % group_size:
         raise ValueError("Cannot refill incomplete GRPO groups")
     total_groups = sum(lengths) // group_size
+    if keep_constant_groups:
+        min_valid_groups = 0
     if min_valid_groups is None:
         min_valid_groups = total_groups
-    if type(min_valid_groups) is not int or not 1 <= min_valid_groups <= total_groups:
+    if not keep_constant_groups and (type(min_valid_groups) is not int or not 1 <= min_valid_groups <= total_groups):
         raise ValueError("min_valid_groups must be between 1 and the requested group count")
     offset = sum(lengths[:process_index])
     groups = [(offset + i) // group_size for i in range(len(samples))]
@@ -200,14 +207,18 @@ def refill_constant_groups(samples, *, sage_generate, gather, group_size, max_at
     def finish(reason, attempt):
         valid_groups = total_groups - len(pending)
         accepted = valid_groups >= min_valid_groups
+        training_groups = total_groups if keep_constant_groups else valid_groups
         if metrics is not None:
             metrics(dict(refill_attempts=attempt, discarded_groups=discarded,
-                         valid_groups=valid_groups, effective_trajectories=valid_groups * group_size if accepted else 0,
-                         masked_groups=len(pending), partial_batch=float(accepted and bool(pending))))
+                         valid_groups=valid_groups, effective_trajectories=training_groups * group_size if accepted else 0,
+                         masked_groups=0 if keep_constant_groups else len(pending),
+                         partial_batch=float(not keep_constant_groups and accepted and bool(pending))))
         if audit is not None:
             audit(dict(event="batch_selection", valid_groups=valid_groups, requested_groups=total_groups,
                        min_valid_groups=min_valid_groups, valid_group_ids=sorted(set(range(total_groups)) - pending),
-                       masked_group_ids=sorted(pending), accepted=accepted, reason=reason,
+                       masked_group_ids=[] if keep_constant_groups else sorted(pending),
+                       constant_group_ids=sorted(pending), keep_constant_groups=keep_constant_groups,
+                       accepted=accepted, reason=reason,
                        refill_attempt=attempt))
         if not accepted:
             raise SkipHintBatch(f"{reason} Valid groups={valid_groups}/{total_groups}; "
@@ -237,7 +248,8 @@ def refill_constant_groups(samples, *, sage_generate, gather, group_size, max_at
             if len(rows) != group_size or len({(r["env_id"], r["seed"], r["level"]) for r in rows}) != 1:
                 raise ValueError("Refill mixed environments, seeds or hint levels in a GRPO group")
         pending = {g for g, rows in grouped.items() if len({r["reward"] for r in rows}) == 1}
-        discarded += len(pending)
+        if not keep_constant_groups:
+            discarded += len(pending)
         if not pending:
             return finish("All requested groups are valid.", attempt)
         if attempt + 1 == max_attempts:

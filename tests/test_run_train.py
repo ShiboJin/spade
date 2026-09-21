@@ -15,7 +15,7 @@ class TrainingLauncherTests(unittest.TestCase):
         command, _ = docker_command(cfg, ROOT / "outputs/training/test-sage", "test-sage")
         self.assertIn("SPADE_SAGE_HINT_RESAMPLING=true", command)
         self.assertIn("SPADE_MAX_ROLLOUT_ATTEMPTS=1", command)
-        self.assertIn("SPADE_MIN_VALID_GROUPS=2", command)
+        self.assertFalse(any("SPADE_MIN_VALID_GROUPS" in x for x in command))
         self.assertIn("DYNAMIC_SAMPLE=false", command)
         cfg = self.config(sage_hint_resampling=False, remove_constant_reward_groups=True)
         command, _ = docker_command(cfg, ROOT / "outputs/training/test-plain", "test-plain")
@@ -26,13 +26,11 @@ class TrainingLauncherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "max_rollout_attempts=1"):
             self.config(max_rollout_attempts=2)
 
-    def test_min_valid_groups_config(self):
-        for value in (0, -1, True, 2.5, 7):
-            with self.assertRaisesRegex(ValueError, "min_valid_groups"):
-                self.config(min_valid_groups=value)
-        cfg = self.config(min_valid_groups=5)
+    def test_legacy_minimum_does_not_gate_updates(self):
+        cfg = self.config(min_valid_groups=99)
+        self.assertNotIn("min_valid_groups", cfg)
         command, _ = docker_command(cfg, ROOT / "outputs/training/test-sage", "test-sage")
-        self.assertIn("SPADE_MIN_VALID_GROUPS=5", command)
+        self.assertFalse(any("SPADE_MIN_VALID_GROUPS" in x for x in command))
 
     def test_sage_rejects_multiple_substeps(self):
         with self.assertRaisesRegex(ValueError, "num_substeps=1"):
@@ -62,7 +60,7 @@ class TrainingLauncherTests(unittest.TestCase):
                         with eval_resources(eval_config(ROOT / "configs/evaluation.json"), root):
                             self.fail("eval overlapped training")
                 with eval_resources(eval_config(ROOT / "configs/evaluation.json",
-                                                dict(gpu_ids=[4, 5, 6, 7])), root):
+                                                dict(gpu_ids=[4, 5, 6, 7], tensor_parallel=4)), root):
                     pass
 
     def config(self, accelerate=None, **updates):

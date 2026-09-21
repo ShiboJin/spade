@@ -23,7 +23,6 @@ from swift.rollout.multi_turn import GYMScheduler
 
 from spade.swift_backend import envduels_gym
 from spade.swift_backend.envduels_sage import install_hint_resampling
-from spade.swift_backend.hint_resampling import SkipHintBatch
 from unittest.mock import patch
 
 
@@ -166,36 +165,29 @@ def main():
             sample.request_id = f"blocked-{i}"
         before = harness.rounds
         with patch.dict("os.environ", SPADE_MAX_ROLLOUT_ATTEMPTS="2"):
-            try:
-                harness._infer_single_or_multi_turn(blocked, RequestConfig())
-            except SkipHintBatch:
-                pass
-            else:
-                raise AssertionError("All-zero group must skip without environment refill")
+            constant = harness._infer_single_or_multi_turn(blocked, RequestConfig())
+            assert len(constant) == 4
+            assert not any(s.rollout_infos["sage_valid_group"] for s in constant)
         assert harness.rounds == before + 2  # no hint, one hinted retry
         assert all("hint_level" not in r["env_config"] for r in harness.train_dataset)
         with patch.dict("os.environ", SPADE_MAX_ROLLOUT_ATTEMPTS="1", SPADE_MIN_VALID_GROUPS="2"):
             initial = deepcopy(batch) + deepcopy(blocked)
-            try:
-                harness._infer_single_or_multi_turn(initial, RequestConfig())
-            except SkipHintBatch:
-                pass
-            else:
-                raise AssertionError("Incomplete batch must skip, never restore constant groups")
+            retained = harness._infer_single_or_multi_turn(initial, RequestConfig())
+            assert len(retained) == 8
+            assert harness._metrics["train"]["sage/effective_trajectories"][-1] == 8
+            assert harness._metrics["train"]["sage/masked_groups"][-1] == 0
         with patch.dict("os.environ", SPADE_MAX_ROLLOUT_ATTEMPTS="1"):
             partial = harness._infer_single_or_multi_turn(deepcopy(batch) + deepcopy(blocked), RequestConfig())
             assert len(partial) == 8
             assert [s.rollout_infos["sage_valid_group"] for s in partial] == [True]*4 + [False]*4
             assert all(s.rollout_infos["sage_valid_groups"] == 1 for s in partial)
         harness.train_dataset = [row("blocked")]
-        try:
-            harness._infer_single_or_multi_turn(blocked, RequestConfig())
-        except SkipHintBatch:
-            pass
-        else:
-            raise AssertionError("All-zero window must skip")
+        assert len(harness._infer_single_or_multi_turn(blocked, RequestConfig())) == 4
+        records = [json.loads(line) for line in (root / "hint_resampling.jsonl").read_text().splitlines()]
+        assert all(not r.get("discarded", False) for r in records)
+        assert all(r.get("accepted", True) for r in records)
         print("PASS: real Swift Gym rollout, Qwen training encoding retains hint, masks hint loss, eval stays unhinted")
-        print("PASS: no-refill selection and bounded skip use the installed Swift sample/request interfaces")
+        print("PASS: full-batch retention despite stale minimum settings use the installed Swift sample/request interfaces")
 
 
 if __name__ == "__main__":

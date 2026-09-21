@@ -1,19 +1,14 @@
-"""Install one hinted retry and effective-group selection for ms-swift."""
+"""Install one hinted retry and retain the full GRPO batch for ms-swift."""
 from copy import deepcopy
 from functools import wraps
 import json
-import logging
 import os
 from pathlib import Path
-import weakref
 
 from spade.swift_backend.hint_resampling import (
-    SkipHintBatch, refill_constant_groups, resample_with_hints, set_hint_level,
+    refill_constant_groups, resample_with_hints, set_hint_level,
 )
 from spade.swift_backend.envduels_sage_loss import install_effective_batch_loss
-
-
-_SKIP_UPDATE_OWNERS = weakref.WeakKeyDictionary()
 
 
 def has_teacher_input(sample):
@@ -53,81 +48,26 @@ def runtime_conflicts(trainer, is_global_inputs=False):
     return conflicts
 
 
-def _guard_update_step(component, trainer):
-    if component is None:
-        return
-    _SKIP_UPDATE_OWNERS[component] = weakref.ref(trainer)
-    cls = type(component)
-    original = cls.step
-    if getattr(original, "_envduels_sage_skip", False):
-        return
-
-    @wraps(original)
-    def step(self, *args, **kwargs):
-        owner = _SKIP_UPDATE_OWNERS.get(self)
-        trainer = owner() if owner is not None else None
-        if trainer is not None and getattr(trainer, "_sage_skip_update", False):
-            return None
-        return original(self, *args, **kwargs)
-
-    # Patch the method, not instance attributes: PyTorch scheduler.state_dict()
-    # serializes instance attributes, which must not capture a Trainer or closure.
-    step._envduels_sage_skip = True
-    cls.step = step
-
-
-def install_skip_updates(trainer_class):
-    """Consume failed rollout windows without backward, AdamW or scheduler steps."""
+def install_update_metrics(trainer_class):
+    """Observe normal training windows without intercepting optimizer/scheduler steps."""
     original = trainer_class.training_step
-    if getattr(original, "_envduels_sage_skip", False):
+    if getattr(original, "_envduels_sage_update_metrics", False):
         return
 
     @wraps(original)
     def training_step(self, model, inputs, *args, **kwargs):
-        import torch
-
-        # Trainer/Accelerate have prepared these objects by the first microstep.
-        # Returning zero loss alone would still execute AdamW decay and advance LR.
-        for component in (self.optimizer, self.lr_scheduler):
-            _guard_update_step(component, self)
-
-        if getattr(self, "_sage_skip_remaining", 0):
-            self._sage_skip_remaining -= 1
-            self._step += 1
-            return torch.zeros((), device=self.accelerator.device)
-        self._sage_skip_update = False
-        try:
-            result = original(self, model, inputs, *args, **kwargs)
-        except SkipHintBatch as exc:
-            accumulation = self.args.gradient_accumulation_steps
-            if (self._step % accumulation or
-                    getattr(self, "current_gradient_accumulation_steps", accumulation) != accumulation):
-                raise RuntimeError("Cannot skip a partially accumulated SAGE window") from exc
-            model.zero_grad(set_to_none=True)
-            self._buffered_inputs = None
-            self._sage_skip_update = True
-            self._sage_skip_remaining = accumulation - 1
-            self._step += 1
-            self._metrics["train"]["sage/skipped_update"].append(1.0)
-            self._metrics["train"]["sage/applied_update"].append(0.0)
-            if self.accelerator.is_main_process:
-                logging.getLogger(__name__).warning("Skipping SAGE update: %s", exc)
-                with (Path(self.args.output_dir) / "hint_resampling.jsonl").open("a") as stream:
-                    stream.write(json.dumps(dict(global_step=self.state.global_step,
-                                                 rollout_step=self._step - 1,
-                                                 event="skipped_update", reason=str(exc))) + "\n")
-            return torch.zeros((), device=self.accelerator.device)
+        result = original(self, model, inputs, *args, **kwargs)
         if self._step % self.args.gradient_accumulation_steps == 0:
             self._metrics["train"]["sage/skipped_update"].append(0.0)
             self._metrics["train"]["sage/applied_update"].append(1.0)
         return result
 
-    training_step._envduels_sage_skip = True
+    training_step._envduels_sage_update_metrics = True
     trainer_class.training_step = training_step
 
 
 def install_hint_resampling(trainer_class, gather):
-    install_skip_updates(trainer_class)
+    install_update_metrics(trainer_class)
     install_effective_batch_loss(trainer_class, gather)
     original = trainer_class._infer_single_or_multi_turn
     if getattr(original, "_envduels_sage", False):
@@ -169,7 +109,7 @@ def install_hint_resampling(trainer_class, gather):
                         final = record["attempts"][-1]["rewards"]
                         record.update(global_step=self.state.global_step,
                                       rollout_step=self._step, refill_attempt=attempt,
-                                      discarded=len(set(final)) == 1)
+                                      constant_reward=len(set(final)) == 1, discarded=False)
                         stream.write(json.dumps(record, ensure_ascii=False) + "\n")
 
             return resample_with_hints(
@@ -186,7 +126,7 @@ def install_hint_resampling(trainer_class, gather):
         return refill_constant_groups(
             samples, sage_generate=sage_generate, gather=gather, group_size=self.num_generations,
             max_attempts=1,  # SAGE never replaces an environment within this window.
-            min_valid_groups=int(os.environ.get("SPADE_MIN_VALID_GROUPS", "2")),
+            keep_constant_groups=True,  # Legacy minimum settings no longer gate updates.
             refill=None, process_index=self.accelerator.process_index, metrics=metrics, audit=selection_audit)
 
     infer._envduels_sage = True

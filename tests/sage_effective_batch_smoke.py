@@ -1,8 +1,4 @@
-"""Three CPU DDP ranks: real Swift GRPO loss equals the valid-only objective.
-
-Includes an entirely masked rank, varying token lengths, nonzero KL, and a
-following full window. No model weights or GPUs are used.
-"""
+"""Three CPU DDP ranks: full-batch Swift GRPO loss and gradients, including constant groups."""
 from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
@@ -15,7 +11,7 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from spade.swift_backend.envduels_sage_loss import install_effective_batch_loss
-from spade.swift_backend.hint_resampling import SkipHintBatch, refill_constant_groups
+from spade.swift_backend.hint_resampling import refill_constant_groups
 from test_hint_resampling import samples
 
 
@@ -104,22 +100,21 @@ def worker(rank, world, rendezvous):
                 env, offset = row.request_id.split("-")
                 row.rollout_infos = dict(total_reward=int(rewards[int(env[3:])*4 + int(offset)]))
             return output
-        try:
-            selected = refill_constant_groups(initial[start:end], sage_generate=generate,
-                                              gather=gather_rows, group_size=4, max_attempts=1,
-                                              min_valid_groups=2, process_index=rank, refill=None)
-        except SkipHintBatch:
-            assert valid < 2
-            assert gather_rows([True]) == [True]*world
-            continue
-        assert valid >= 2
+        selection_stats = []
+        selected = refill_constant_groups(initial[start:end], sage_generate=generate,
+                                          gather=gather_rows, group_size=4, max_attempts=1,
+                                          min_valid_groups=99, process_index=rank, refill=None,
+                                          keep_constant_groups=True, metrics=selection_stats.append)
+        assert selection_stats[-1]["valid_groups"] == valid
+        assert selection_stats[-1]["effective_trajectories"] == 24
+        assert selection_stats[-1]["masked_groups"] == selection_stats[-1]["discarded_groups"] == 0
         for beta in (0.0, 0.1):
             trainer.beta = beta
             ddp.zero_grad(set_to_none=True)
             with torch.no_grad():
                 old = model(features).squeeze(-1) + torch.linspace(-0.3, 0.3, 24)[:, None]
                 reference = old + 0.15
-                # Invalid slots would have a material KL loss if not masked.
+                # Constant groups retain their KL loss when beta is nonzero.
                 reference[valid*4:] += 2.0
             trainer._rewards_per_func = rewards[:, None]
             batches = []
@@ -135,16 +130,17 @@ def worker(rank, world, rendezvous):
                 loss = trainer.compute_loss(ddp, batch)
                 assert torch.isfinite(loss)
                 if start + i*2 >= valid*4:
-                    assert loss.item() == 0.0
-                    assert not batch["grpo_batch"].completion_mask.any()
+                    if beta == 0:
+                        assert loss.item() == 0.0
+                    assert batch["grpo_batch"].completion_mask.any()
                 (loss / 4).backward()
                 total_loss += loss.detach() / 4
             dist.all_reduce(total_loss)
             total_loss /= world
             actual_grad = model.weight.grad.clone()
-            # Independent valid-only GRPO objective, with no padded rows.
+            # Independent full-batch GRPO objective; constant slots stay in the denominator.
             weight = model.weight.detach().clone().requires_grad_(True)
-            n = valid * 4
+            n = 24
             logps = torch.nn.functional.linear(features[:n], weight).squeeze(-1)
             adv = rewards[:n].view(-1, 4)
             adv = (adv - adv.mean(1, keepdim=True)).flatten()[:, None]
@@ -156,16 +152,16 @@ def worker(rank, world, rendezvous):
             baseline.backward()
             torch.testing.assert_close(total_loss, baseline.detach(), atol=1e-10, rtol=1e-10)
             torch.testing.assert_close(actual_grad, weight.grad, atol=1e-10, rtol=1e-10)
-            assert trainer._metrics["train"]["sage/effective_reward"][-1] == 0.25
+            assert trainer._metrics["train"]["sage/effective_reward"][-1] == rewards.mean().item()
     # Eval must not require training selection metadata or apply its scaling.
     ddp.eval()
     raw = batches[0]
-    raw.pop("_sage_loss_scale")
+    assert "_sage_loss_scale" not in raw
     assert torch.isfinite(trainer.compute_loss(ddp, raw))
     dist.barrier()
     if rank == 0:
-        print("PASS: 3 CPU DDP ranks: 24/20/16/12/8 valid trajectories match valid-only Swift GRPO loss and gradients")
-        print("PASS: fully masked rank contributes zero (including KL); 0–1 valid groups skip; subsequent full window and eval work")
+        print("PASS: 3 CPU DDP ranks: 0–6 mixed groups match full-batch Swift GRPO loss and gradients")
+        print("PASS: constant groups retain masks and KL; 0–1 mixed groups still train; subsequent full window and eval work")
     dist.destroy_process_group()
 
 
