@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -10,6 +11,55 @@ from scripts import memory_guard as guard
 
 
 class MemoryGuardTests(unittest.TestCase):
+    def test_gpu_locks_across_processes_and_release_on_exit(self):
+        # A real separate launcher holds GPUs, with only Docker/RAM probing mocked.
+        code = '''
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from scripts.memory_guard import task_resources
+cfg = dict(gpu_ids=[0, 1, 2, 3], memory_limit_gib=80, host_memory_reserve_gib=48)
+with patch("scripts.memory_guard.concurrent_preflight"), task_resources(cfg, Path(sys.argv[1])):
+    print("ready", flush=True)
+    sys.stdin.read()
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            process = subprocess.Popen([sys.executable, "-c", code, directory],
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            try:
+                import select
+                self.assertTrue(select.select([process.stdout], [], [], 10)[0], "launcher did not become ready")
+                self.assertEqual(process.stdout.readline().strip(), "ready")
+                cfg = dict(gpu_ids=[4, 5, 6, 7], memory_limit_gib=80, host_memory_reserve_gib=48)
+                with patch.object(guard, "concurrent_preflight") as check:
+                    with guard.task_resources(cfg, root):
+                        self.assertEqual(check.call_args.args[2], 80)
+                    with self.assertRaisesRegex(RuntimeError, "GPU 3"):
+                        with guard.task_resources({**cfg, "gpu_ids": [3, 4]}, root):
+                            self.fail("overlapping GPUs admitted")
+                process.kill()
+                process.wait(timeout=10)
+                with patch.object(guard, "concurrent_preflight") as check:
+                    with guard.task_resources({**cfg, "gpu_ids": [0, 1, 2, 3]}, root):
+                        self.assertEqual(check.call_args.args[2], 0)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=10)
+
+    def test_failed_admission_releases_gpu_reservations(self):
+        cfg = dict(gpu_ids=[0, 1], memory_limit_gib=80, host_memory_reserve_gib=48)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(guard, "concurrent_preflight", side_effect=RuntimeError("RAM")):
+                with self.assertRaisesRegex(RuntimeError, "RAM"):
+                    with guard.task_resources(cfg, root):
+                        self.fail("admitted without RAM")
+            with patch.object(guard, "concurrent_preflight") as check:
+                with guard.task_resources(cfg, root):
+                    self.assertEqual(check.call_args.args[2], 0)
+
     def test_preflight_refuses_unsafe_host(self):
         info = dict(MemoryLimit=True, SwapLimit=False, CgroupVersion="1", MemTotal=252 * guard.GIB)
         for changes, available, message in (

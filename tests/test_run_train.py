@@ -3,14 +3,69 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.run_train import ROOT, ROLLOUT_DEFAULTS, docker_command, load_config
 
 
 class TrainingLauncherTests(unittest.TestCase):
-    def config(self, **updates):
+    def test_sage_defaults_and_exclusive_refill_control(self):
+        cfg = self.config(remove_constant_reward_groups=True)
+        self.assertTrue(cfg["sage_hint_resampling"])
+        command, _ = docker_command(cfg, ROOT / "outputs/training/test-sage", "test-sage")
+        self.assertIn("SPADE_SAGE_HINT_RESAMPLING=true", command)
+        self.assertIn("SPADE_MAX_ROLLOUT_ATTEMPTS=2", command)
+        self.assertIn("SPADE_MIN_VALID_GROUPS=4", command)
+        self.assertIn("DYNAMIC_SAMPLE=false", command)
+        cfg = self.config(sage_hint_resampling=False, remove_constant_reward_groups=True)
+        command, _ = docker_command(cfg, ROOT / "outputs/training/test-plain", "test-plain")
+        self.assertIn("SPADE_SAGE_HINT_RESAMPLING=false", command)
+        self.assertIn("DYNAMIC_SAMPLE=true", command)
+
+    def test_min_valid_groups_config(self):
+        for value in (0, -1, True, 2.5, 7):
+            with self.assertRaisesRegex(ValueError, "min_valid_groups"):
+                self.config(min_valid_groups=value)
+        cfg = self.config(min_valid_groups=5)
+        command, _ = docker_command(cfg, ROOT / "outputs/training/test-sage", "test-sage")
+        self.assertIn("SPADE_MIN_VALID_GROUPS=5", command)
+
+    def test_sage_rejects_multiple_substeps(self):
+        with self.assertRaisesRegex(ValueError, "num_substeps=1"):
+            self.config(num_substeps=2)
+        self.config(num_substeps=2, sage_hint_resampling=False)
+
+    def test_disjoint_training_and_evaluation_use_shared_gpu_reservations(self):
+        from scripts.run_train import task_resources as training_resources
+        from scripts.run_eval import task_resources as eval_resources
+        from scripts.run_eval import load_config as eval_config
+        accelerate = {**self.config()["accelerate"], "num_processes": 4}
+        first = self.config(gpu_ids=[0, 1, 2, 3], vllm_tensor_parallel=4, memory_limit_gib=80,
+                            accelerate=accelerate)
+        second = self.config(gpu_ids=[4, 5, 6, 7], vllm_tensor_parallel=4, memory_limit_gib=80,
+                             accelerate=accelerate)
+        for cfg in (first, second):
+            command, _ = docker_command(cfg, ROOT / "outputs/training/test", "test")
+            self.assertIn('"device=' + ','.join(map(str, cfg["gpu_ids"])) + '"', command)
+            self.assertIn("spade.gpu-concurrent=true", command)
+            self.assertIn("NUM_GPUS=4", command)
+            self.assertEqual(cfg["accelerate"]["num_processes"], 4)
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.memory_guard.concurrent_preflight"):
+            root = Path(directory)
+            with training_resources(first, root):
+                with training_resources(second, root):
+                    with self.assertRaisesRegex(RuntimeError, "GPU"):
+                        with eval_resources(eval_config(ROOT / "configs/evaluation.json"), root):
+                            self.fail("eval overlapped training")
+                with eval_resources(eval_config(ROOT / "configs/evaluation.json",
+                                                dict(gpu_ids=[4, 5, 6, 7])), root):
+                    pass
+
+    def config(self, accelerate=None, **updates):
         document = json.loads((ROOT / "configs/train_qwen38_envduels_lora.json").read_text())
         document["training"].update(updates)
+        if accelerate is not None:
+            document["accelerate"] = accelerate
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "training.json"
             path.write_text(json.dumps(document))
@@ -163,7 +218,7 @@ class TrainingLauncherTests(unittest.TestCase):
     def test_legacy_rollout_defaults_and_zero_sleep(self):
         document = json.loads((ROOT / "configs/train_qwen38_envduels_lora.json").read_text())
         for key in ROLLOUT_DEFAULTS:
-            document["training"].pop(key)
+            document["training"].pop(key, None)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "training.json"
             path.write_text(json.dumps(document))

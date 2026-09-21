@@ -5,8 +5,7 @@ Validate without Docker/GPU access: add --dry-run.
 """
 import argparse
 import asyncio
-from contextlib import contextmanager, ExitStack
-import fcntl
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -23,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.benchmark_data import grade
 from scripts.memory_guard import (
-    DEFAULT_RESERVE_GIB, GIB, docker_memory_args, guarded_wait, memory_available,
+    DEFAULT_RESERVE_GIB, docker_memory_args, guarded_wait, task_resources,
     validate_limits, verify_container_limits,
 )
 
@@ -41,75 +40,6 @@ DEFAULTS = dict(
     memory_limit_gib=96, host_memory_reserve_gib=DEFAULT_RESERVE_GIB,
 )
 
-
-@contextmanager
-def evaluation_resources(cfg, root=ROOT):
-    """Share the training exclusion lock, reserve GPUs and RAM across evals."""
-    with ExitStack() as stack:
-        gate = stack.enter_context((root / ".spade-memory.lock").open("a"))
-        try:
-            fcntl.flock(gate, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError("A training or legacy evaluation launcher is active; wait for it to finish") from exc
-        # Serialize admission, including launchers which have not started Docker yet.
-        with (root / ".spade-eval-admission.lock").open("a") as admission:
-            fcntl.flock(admission, fcntl.LOCK_EX)
-            reserved = 0.0
-            capacity = memory_available() / GIB
-            capacities = []
-            reserve = cfg["host_memory_reserve_gib"]
-            for path in root.glob(".spade-eval-gpu-*.lock"):
-                with path.open("r+") as existing:
-                    try:
-                        fcntl.flock(existing, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    except BlockingIOError:
-                        record = json.load(existing)
-                        reserved += record["budget_gib"]
-                        reserve = max(reserve, record["reserve_gib"])
-                        capacities.append(record["capacity_gib"])
-            capacity = min([capacity + reserved, *capacities])
-            gpu_locks = []
-            for gpu in sorted(cfg["gpu_ids"]):
-                lock = stack.enter_context((root / f".spade-eval-gpu-{gpu}.lock").open("a+"))
-                try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError as exc:
-                    raise RuntimeError(f"GPU {gpu} is already reserved by another evaluation") from exc
-                gpu_locks.append(lock)
-            evaluation_preflight(cfg["memory_limit_gib"], reserve, reserved, capacity)
-            for lock in gpu_locks:
-                lock.seek(0)
-                lock.truncate()
-                json.dump(dict(budget_gib=cfg["memory_limit_gib"] / len(gpu_locks),
-                               capacity_gib=capacity,
-                               reserve_gib=cfg["host_memory_reserve_gib"]), lock)
-                lock.flush()
-        yield
-
-
-def evaluation_preflight(limit_gib, reserve_gib, reserved_gib, capacity_gib):
-    info = json.loads(subprocess.check_output(
-        ["docker", "info", "--format", "{{json .}}"], text=True, timeout=15))
-    if not info.get("MemoryLimit") or (not info.get("SwapLimit") and str(info.get("CgroupVersion")) != "1"):
-        raise RuntimeError("Docker cannot enforce RAM/no-swap limits; refusing to start")
-    available = min(memory_available(), info["MemTotal"]) / GIB
-    # Reserve aggregate budgets against admission capacity, and also check live RAM.
-    if (min(capacity_gib, info["MemTotal"] / GIB) < limit_gib + reserved_gib + reserve_gib
-            or available < limit_gib + reserve_gib):
-        raise RuntimeError(
-            f"Not enough host RAM: {available:.1f} GiB available; need {limit_gib} GiB new eval "
-            f"+ {reserved_gib:g} GiB other eval budgets + {reserve_gib} GiB host reserve")
-    containers = subprocess.check_output(
-        ["docker", "ps", "--filter", "label=spade.memory-guard=true",
-         "--format", '{{.Names}}\t{{.Label "spade.eval-concurrent"}}'],
-        text=True, timeout=15).strip()
-    active = []
-    for line in containers.splitlines():
-        name, _, concurrent = line.partition("\t")
-        if concurrent != "true":
-            active.append(name)
-    if active:
-        raise RuntimeError(f"A training or legacy guarded container is running: {', '.join(active)}")
 
 
 def write_json(path, value):
@@ -365,7 +295,7 @@ def docker_command(cfg, out, name):
                "--gpus", '"device=' + ','.join(map(str, cfg["gpu_ids"])) + '"',
                "--network", "none", "--shm-size", "16g", "--user", f"{os.getuid()}:{os.getgid()}"]
     command += docker_memory_args(cfg["memory_limit_gib"])
-    command += ["--label", "spade.eval-concurrent=true"]
+    command += ["--label", "spade.gpu-concurrent=true"]
     for source, target, readonly in mounts:
         if "," in str(source):
             raise ValueError("Docker mount paths must not contain commas")
@@ -429,7 +359,7 @@ def main():
     if args.dry_run:
         print("Dry run only; no container started or GPU allocated.")
         return
-    with evaluation_resources(cfg):
+    with task_resources(cfg, ROOT):
         run_evaluation(cfg, out, name, command, report, checkpoint)
 
 

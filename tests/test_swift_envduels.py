@@ -93,6 +93,29 @@ class SwiftEnvDuelsTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "closed"):
             asyncio.run(first.reset(object()))
 
+    def test_hint_is_only_player_context_and_reward_is_unchanged(self):
+        manifest = json.loads((self.root / "manifest.json").read_text())
+        manifest["environments"][0]["privileged"] = "privileged.json"
+        (self.root / "manifest.json").write_text(json.dumps(manifest))
+        (self.root / "privileged.json").write_text(json.dumps(
+            dict(environment_id=self.env_id, hints=dict(hint="Choose WIN."))))
+        install_swift_stubs()
+        sys.modules.pop("spade.swift_backend.envduels_gym", None)
+        plugin = importlib.import_module("spade.swift_backend.envduels_gym")
+        base = dict(export_dir=str(self.root), env_id=self.env_id, seed=123)
+        plain = plugin.SwiftEnvDuelsEnv(base)
+        hinted = plugin.SwiftEnvDuelsEnv({**base, "hint_level": 1})
+        observation0, _, system0 = asyncio.run(plain.reset(object()))
+        observation1, info1, system1 = asyncio.run(hinted.reset(object()))
+        self.assertNotIn("Choose WIN.", observation0 + system0)
+        self.assertEqual(system0, system1)
+        self.assertEqual(observation1, observation0 + "\n\nPlayer hint:\nChoose WIN.\n")
+        self.assertEqual(info1["hint_level"], 1)
+        for env in (plain, hinted):
+            _, reward, done, _ = asyncio.run(env.step([dict(role="assistant", content=r"\boxed{WIN}")]))
+            self.assertEqual((reward, done), (1.0, True))
+            asyncio.run(env.close())
+
 
 if __name__ == "__main__":
     unittest.main()

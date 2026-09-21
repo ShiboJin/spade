@@ -16,7 +16,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.memory_guard import (
-    DEFAULT_RESERVE_GIB, docker_memory_args, guarded_wait, launch_lock, preflight, validate_limits,
+    DEFAULT_RESERVE_GIB, docker_memory_args, guarded_wait, task_resources, validate_limits,
 )
 CONTAINER_ROOT = Path("/workspace/envduels/spade")
 CONTAINER_EXPORT = Path("/workspace/envduels/exports/duel_harness_004_rl")
@@ -42,6 +42,8 @@ FIELDS = {
 }
 MEMORY_DEFAULTS = {"memory_limit_gib": 160, "host_memory_reserve_gib": DEFAULT_RESERVE_GIB}
 ROLLOUT_DEFAULTS = {
+    "sage_hint_resampling": True,
+    "min_valid_groups": 4,
     "vllm_enforce_eager": True,
     "sleep_level": 2,
     "offload_model": True,
@@ -119,7 +121,7 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
     positive_ints = (
         "fixed_pool_epochs", "num_games_per_rollout", "trajectories_per_game",
         "batch_size", "per_device_train_batch_size", "num_substeps",
-        "max_rollout_attempts", "lora_rank", "lora_alpha", "max_turns",
+        "max_rollout_attempts", "min_valid_groups", "lora_rank", "lora_alpha", "max_turns",
         "max_context_length", "actor_max_tokens", "vllm_tensor_parallel",
         "actor_top_k", "save_every", "save_total_limit", "move_model_batches", "grpo_logps_chunk_size",
     )
@@ -130,13 +132,17 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
         raise ValueError("max_steps must be null or a positive integer")
     if type(cfg["fixed_pool_seed"]) is not int or not 0 <= cfg["fixed_pool_seed"] < 2**63:
         raise ValueError("fixed_pool_seed must be an integer in [0, 2**63)")
-    for key in ("dataset_shuffle", "remove_constant_reward_groups", "enable_thinking",
+    for key in ("sage_hint_resampling", "dataset_shuffle", "remove_constant_reward_groups", "enable_thinking",
                 "preserve_thinking", "overlong_filter", "rollout_json_export",
                 "wandb_enabled", "grpo_chunked_logps", "grpo_decoder_checkpointing",
                 "grpo_cpu_activation_offload", "grpo_checkpoint_delta_rule",
                 "vllm_enforce_eager", "offload_model", "offload_optimizer"):
         if type(cfg[key]) is not bool:
             raise ValueError(f"{key} must be a boolean")
+    if cfg["sage_hint_resampling"] and cfg["num_substeps"] != 1:
+        raise ValueError("sage_hint_resampling requires num_substeps=1 for whole-window skipping")
+    if cfg["sage_hint_resampling"] and cfg["min_valid_groups"] > cfg["num_games_per_rollout"]:
+        raise ValueError("min_valid_groups must not exceed num_games_per_rollout")
     if type(cfg["sleep_level"]) is not int or cfg["sleep_level"] not in (0, 1, 2):
         raise ValueError("sleep_level must be an integer in {0, 1, 2}")
     if cfg["grpo_cpu_activation_offload"] and not cfg["grpo_decoder_checkpointing"]:
@@ -211,6 +217,11 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
         raise ValueError("EnvDuels manifest has invalid environment IDs")
     if len(manifest_ids) != len(set(manifest_ids)):
         raise ValueError("EnvDuels manifest has duplicate environment IDs")
+    if cfg["sage_hint_resampling"]:
+        from spade.core.envduels_hints import load_hint_levels
+        for row in manifest["environments"]:
+            if not load_hint_levels(cfg["export_dir"], row):
+                raise ValueError(f"SAGE training requires an author hint: {row['id']}")
     accelerate = document["accelerate"]
     if accelerate.get("distributed_type") != "FSDP":
         raise ValueError("Accelerate config must use FSDP")
@@ -295,6 +306,7 @@ def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[
         "--workdir", str(CONTAINER_ROOT),
     ]
     command += docker_memory_args(cfg["memory_limit_gib"])
+    command += ["--label", "spade.gpu-concurrent=true"]
     environment = {
         # Numeric host UIDs need not exist in the image's /etc/passwd.
         # Inductor calls getpass.getuser() even with TORCHINDUCTOR_CACHE_DIR set.
@@ -341,7 +353,11 @@ def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[
         "LOSS_TYPE": cfg["loss_type"],
         "PPO_CLIP_LOW": cfg["ppo_clip_low"],
         "PPO_CLIP_HIGH": cfg["ppo_clip_high"],
-        "DYNAMIC_SAMPLE": str(cfg["remove_constant_reward_groups"]).lower(),
+        # SAGE owns group refill, so disable the separate DAPO resampling loop.
+        "DYNAMIC_SAMPLE": str(cfg["remove_constant_reward_groups"] and not cfg["sage_hint_resampling"]).lower(),
+        "SPADE_SAGE_HINT_RESAMPLING": str(cfg["sage_hint_resampling"]).lower(),
+        "SPADE_MAX_ROLLOUT_ATTEMPTS": cfg["max_rollout_attempts"],
+        "SPADE_MIN_VALID_GROUPS": cfg["min_valid_groups"],
         "MAX_RESAMPLE_TIMES": cfg["max_rollout_attempts"],
         "OVERLONG_FILTER": str(cfg["overlong_filter"]).lower(),
         "LOG_COMPLETIONS": str(cfg["rollout_json_export"]).lower(),
@@ -438,8 +454,7 @@ def main() -> None:
     if cfg["wandb_enabled"] and cfg["wandb_mode"] == "online" and not os.environ.get("WANDB_API_KEY"):
         parser.error("online W&B requires WANDB_API_KEY in the host environment")
 
-    with launch_lock(ROOT / ".spade-memory.lock"):
-        preflight(cfg["memory_limit_gib"], cfg["host_memory_reserve_gib"])
+    with task_resources(cfg, ROOT):
         run_training(cfg, run_dir, container_name, command, report)
 
 

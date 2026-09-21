@@ -1,5 +1,5 @@
 """Host and cgroup memory safety for the Docker training/evaluation launchers."""
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import fcntl
 import json
 from pathlib import Path
@@ -46,6 +46,84 @@ def preflight(limit_gib, reserve_gib):
     ).strip()
     if active:
         raise RuntimeError(f"A guarded task is already running: {active}. Wait for it to finish.")
+
+
+
+@contextmanager
+def task_resources(cfg, root):
+    """Reserve GPUs and RAM across training and evaluation launchers."""
+    validate_limits(cfg["memory_limit_gib"], cfg["host_memory_reserve_gib"])
+    # Keep historical lock paths so already-running evals remain protected.
+    with ExitStack() as stack:
+        gate = stack.enter_context((root / ".spade-memory.lock").open("a"))
+        try:
+            fcntl.flock(gate, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("A legacy training/evaluation launcher is active; wait for it to finish") from exc
+        # Serialize admission, including launchers which have not started Docker yet.
+        with (root / ".spade-eval-admission.lock").open("a") as admission:
+            fcntl.flock(admission, fcntl.LOCK_EX)
+            reserved = 0.0
+            capacity = memory_available() / GIB
+            capacities = []
+            reserve = cfg["host_memory_reserve_gib"]
+            for path in root.glob(".spade-eval-gpu-*.lock"):
+                with path.open("r+") as existing:
+                    try:
+                        fcntl.flock(existing, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        record = json.load(existing)
+                        reserved += record["budget_gib"]
+                        reserve = max(reserve, record["reserve_gib"])
+                        capacities.append(record["capacity_gib"])
+            capacity = min([capacity + reserved, *capacities])
+            try:
+                gpu_locks = []
+                for gpu in sorted(cfg["gpu_ids"]):
+                    lock = stack.enter_context((root / f".spade-eval-gpu-{gpu}.lock").open("a+"))
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError as exc:
+                        raise RuntimeError(f"GPU {gpu} is already reserved by another training/evaluation task") from exc
+                    gpu_locks.append(lock)
+                concurrent_preflight(cfg["memory_limit_gib"], reserve, reserved, capacity)
+                for lock in gpu_locks:
+                    lock.seek(0)
+                    lock.truncate()
+                    json.dump(dict(budget_gib=cfg["memory_limit_gib"] / len(gpu_locks),
+                                   capacity_gib=capacity,
+                                   reserve_gib=cfg["host_memory_reserve_gib"]), lock)
+                    lock.flush()
+            except BaseException:
+                # Release partial reservations before another admission can inspect them.
+                stack.close()
+                raise
+        yield
+
+
+def concurrent_preflight(limit_gib, reserve_gib, reserved_gib, capacity_gib):
+    info = json.loads(subprocess.check_output(
+        ["docker", "info", "--format", "{{json .}}"], text=True, timeout=15))
+    if not info.get("MemoryLimit") or (not info.get("SwapLimit") and str(info.get("CgroupVersion")) != "1"):
+        raise RuntimeError("Docker cannot enforce RAM/no-swap limits; refusing to start")
+    available = min(memory_available(), info["MemTotal"]) / GIB
+    # Reserve aggregate budgets against admission capacity, and also check live RAM.
+    if (min(capacity_gib, info["MemTotal"] / GIB) < limit_gib + reserved_gib + reserve_gib
+            or available < limit_gib + reserve_gib):
+        raise RuntimeError(
+            f"Not enough host RAM: {available:.1f} GiB available; need {limit_gib} GiB new task "
+            f"+ {reserved_gib:g} GiB other task budgets + {reserve_gib} GiB host reserve")
+    containers = subprocess.check_output(
+        ["docker", "ps", "--filter", "label=spade.memory-guard=true",
+         "--format", '{{.Names}}\t{{.Label "spade.eval-concurrent"}}\t{{.Label "spade.gpu-concurrent"}}'],
+        text=True, timeout=15).strip()
+    active = []
+    for line in containers.splitlines():
+        name, *labels = line.split("\t")
+        if "true" not in labels:
+            active.append(name)
+    if active:
+        raise RuntimeError(f"A legacy guarded container is running: {', '.join(active)}")
 
 
 def verify_container_limits(limit_gib, root=Path("/sys/fs/cgroup")):

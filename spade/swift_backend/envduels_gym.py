@@ -49,7 +49,17 @@ class SwiftEnvDuelsEnv(Env):
             raise ValueError("env_config.env_id must be a nonempty string")
         if type(seed) is not int:
             raise ValueError("env_config.seed must be an integer")
-        self.instance = _get_adapter(export_dir).create_instance_with_seed(env_id, seed)
+        adapter = _get_adapter(export_dir)
+        self.hint_level = env_config.get("hint_level", 0)
+        if type(self.hint_level) is not int or self.hint_level < 0:
+            raise ValueError("hint_level must be a nonnegative integer")
+        self.hint = None
+        if self.hint_level:
+            levels = adapter.get_hint_levels(env_id)
+            if self.hint_level > len(levels):
+                raise ValueError(f"No hint level {self.hint_level} for {env_id}")
+            self.hint = levels[self.hint_level - 1]
+        self.instance = adapter.create_instance_with_seed(env_id, seed)
         self.seed = seed
         self.closed = False
 
@@ -62,12 +72,16 @@ class SwiftEnvDuelsEnv(Env):
             f"Observation: {observation}\n\n"
             "Respond with exactly one action for this turn inside \\boxed{}."
         )
+        if self.hint is not None:
+            # Match the external CLI harness: guidance in player context only.
+            initial += "\n\nPlayer hint:\n" + self.hint + "\n"
         metadata = {
             **info,
             "env_id": self.instance.env_id,
             "category": self.instance.category,
             "seed": self.seed,
             "problem_id": self.instance.metadata["problem_id"],
+            "hint_level": self.hint_level,
         }
         return initial, metadata, SYSTEM_PROMPT
 

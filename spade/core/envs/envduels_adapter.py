@@ -120,6 +120,15 @@ class EnvDuelsAdapter(EnvironmentAdapter):
     def get_category(self, env_id):
         return self.rows[env_id]["domain"]
 
+    def get_hint_levels(self, env_id):
+        """Read author hints explicitly; ordinary environment resets never read them.
+
+        Level 0 is always unhinted. A single-hint export supplies level 1;
+        graded exports supply hint_1, then hint_2 (not concatenated).
+        """
+        from spade.core.envduels_hints import load_hint_levels
+        return load_hint_levels(self.root, self.rows[env_id])
+
     def _create(self, env_id, seed):
         row = self.rows[env_id]
         if env_id not in self.classes:

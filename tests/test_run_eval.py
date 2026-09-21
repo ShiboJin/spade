@@ -10,13 +10,13 @@ from unittest.mock import patch
 
 from scripts.run_eval import ROOT, build_server_command, docker_command, load_config, load_dataset, score_dataset
 from scripts.benchmark_data import grade
-from scripts.run_eval import evaluation_resources, evaluation_preflight
+from scripts.memory_guard import task_resources as evaluation_resources, concurrent_preflight as evaluation_preflight
 from scripts.memory_guard import launch_lock, GIB
 
 
 class EvaluationTests(unittest.TestCase):
-    def test_eval_gpu_reservations_and_training_exclusion(self):
-        with tempfile.TemporaryDirectory() as directory, patch("scripts.run_eval.evaluation_preflight") as check:
+    def test_eval_gpu_reservations_and_legacy_exclusion(self):
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.memory_guard.concurrent_preflight") as check:
             root = Path(directory)
             first = self.config(gpu_ids=[0, 1], tensor_parallel=2)
             second = self.config(gpu_ids=[2, 3], tensor_parallel=2)
@@ -39,12 +39,12 @@ class EvaluationTests(unittest.TestCase):
 
     def test_eval_aggregate_memory_budget(self):
         info = json.dumps(dict(MemoryLimit=True, SwapLimit=True, MemTotal=252 * GIB))
-        with patch("scripts.run_eval.subprocess.check_output", side_effect=[info, ""]), patch(
-                "scripts.run_eval.memory_available", return_value=180 * GIB):
+        with patch("scripts.memory_guard.subprocess.check_output", side_effect=[info, ""]), patch(
+                "scripts.memory_guard.memory_available", return_value=180 * GIB):
             evaluation_preflight(80, 48, 80, 229)
         for available, capacity in [(120, 229), (229, 200)]:
-            with patch("scripts.run_eval.subprocess.check_output", return_value=info), patch(
-                    "scripts.run_eval.memory_available", return_value=available * GIB):
+            with patch("scripts.memory_guard.subprocess.check_output", return_value=info), patch(
+                    "scripts.memory_guard.memory_available", return_value=available * GIB):
                 with self.assertRaisesRegex(RuntimeError, "Not enough"):
                     evaluation_preflight(80, 48, 80, capacity)
 
@@ -52,10 +52,11 @@ class EvaluationTests(unittest.TestCase):
         info = json.dumps(dict(MemoryLimit=True, SwapLimit=True, MemTotal=252 * GIB))
         for listing, blocked in [("eval-a\ttrue\neval-b\ttrue\n", False),
                                  ("eval-a\ttrue\ntrain-a\t\n", True),
-                                 ("old-eval\tfalse\n", True)]:
+                                 ("old-eval\tfalse\n", True),
+                                 ("train-a\t\ttrue\neval-a\ttrue\t\n", False)]:
             with self.subTest(listing=listing), patch(
-                    "scripts.run_eval.subprocess.check_output", side_effect=[info, listing]) as command, patch(
-                    "scripts.run_eval.memory_available", return_value=229 * GIB):
+                    "scripts.memory_guard.subprocess.check_output", side_effect=[info, listing]) as command, patch(
+                    "scripts.memory_guard.memory_available", return_value=229 * GIB):
                 if blocked:
                     with self.assertRaisesRegex(RuntimeError, "legacy guarded"):
                         evaluation_preflight(80, 48, 0, 229)
