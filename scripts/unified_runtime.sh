@@ -7,7 +7,7 @@ ACTION="${1:-plan}"
 IMAGE="${ENVDUELS_IMAGE:-envduels-unified:cu124}"
 WANDB_IMAGE="${ENVDUELS_WANDB_IMAGE:-envduels-unified:cu124-wandb}"
 EXPORT_DIR="$(realpath -e "${ENVDUELS_EXPORT_DIR:-$ROOT/../exports/duel_harness_004_rl}")"
-DATASET="$ROOT/data/envduels/fixed90-swift.jsonl"
+DATASET="${ENVDUELS_DATASET:-$ROOT/data/envduels/fixed90-swift.jsonl}"
 TRAIN_CONFIG="${TRAIN_CONFIG:-$ROOT/configs/train_qwen38_envduels_lora.json}"
 
 case "$ACTION" in

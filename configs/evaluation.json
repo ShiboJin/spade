@@ -24,22 +24,20 @@
     "image": "envduels-unified:cu124",
     "gpu_ids": [
       0,
-      1,
-      2,
-      3
+      1
     ],
-    "tensor_parallel": 4,
+    "tensor_parallel": 2,
     "dtype": "bfloat16",
     "context_length": 12288,
     "gpu_memory_utilization": 0.9,
-    "max_num_seqs": 16,
-    "max_num_batched_tokens": 4096,
+    "max_num_seqs": 160,
+    "max_num_batched_tokens": 8192,
     "enforce_eager": true,
     "limit_mm_per_prompt": {
       "image": 0,
       "video": 0
     },
-    "max_concurrent_problems": 1,
+    "max_concurrent_problems": 20,
     "request_timeout_seconds": 1800,
     "startup_timeout_seconds": 1200,
     "memory_limit_gib": 80

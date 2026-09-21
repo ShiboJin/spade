@@ -23,10 +23,12 @@
     "seed": 42,
     "image": "envduels-unified:cu124",
     "gpu_ids": [
+      0,
+      1,
       2,
       3
     ],
-    "tensor_parallel": 2,
+    "tensor_parallel": 4,
     "dtype": "bfloat16",
     "context_length": 12288,
     "gpu_memory_utilization": 0.9,
