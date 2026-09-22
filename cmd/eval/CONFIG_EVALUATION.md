@@ -36,6 +36,7 @@ python scripts/run_eval.py --config configs/evaluation.json \
 1. AIME 2025 Avg@8
 2. AIME 2026 Avg@8
 3. GEM（Reasoning-Gym、LCB-v6、GPQA-D）
+4. ACEBench-Agent（仅 Agent multi-step 和 multi-turn）
 
 完整运行配置中的全部项目：
 
@@ -43,13 +44,13 @@ python scripts/run_eval.py --config configs/evaluation.json \
 python scripts/run_eval.py --config configs/qwen38_all_evals.json
 ```
 
-也可以用一个 `--evals` 后跟多个名字来选择项目并明确执行顺序。例如只运行 AIME25、
-AIME26 和 GEM，并保证前一个结束后才开始下一个：
+也可以用一个 `--evals` 后跟多个名字来选择项目并明确执行顺序。例如运行 AIME25、
+AIME26、GEM 和 ACEBench-Agent，并保证前一个结束后才开始下一个：
 
 ```bash
 python scripts/run_eval.py \
   --config configs/qwen38_all_evals.json \
-  --evals aime25 aime26 gem
+  --evals aime25 aime26 gem acebench
 ```
 
 只验证一题、一次采样，不启动完整 suite：
@@ -67,7 +68,7 @@ python scripts/run_eval.py \
 ```bash
 python scripts/run_eval.py \
   --config configs/qwen38_all_evals.json \
-  --evals aime25 aime26 gem \
+  --evals aime25 aime26 gem acebench \
   --dry-run
 ```
 
@@ -75,8 +76,9 @@ python scripts/run_eval.py \
 和 `data`；离线 suite 使用 `type: "suite"`、`config` 和 `suites`。数组顺序是默认运行顺序，
 `--evals` 的参数顺序会覆盖它。相邻且 `context_length` 相同的项目复用一个 vLLM；配置变化时
 自动重启服务。当前 AIME25/26 共用 40960 上下文服务，随后只重启一次，以 32768 上下文运行
-GEM。GEM 配置只包含 Reasoning-Gym 的 math、algorithmic、cognition、logic 四类，以及
-GPQA-D 和 LCB-v6，不再运行 ACEBench。任何一步失败时立即停止，不会把后续评测误报为已完成。
+GEM 和 ACEBench。GEM 配置只包含 Reasoning-Gym 的 math、algorithmic、cognition、logic 四类，
+以及 GPQA-D 和 LCB-v6。ACEBench 配置只运行 Agent 子集，并分别报告 multi-step 和 multi-turn，
+并发为 16。任何一步失败时立即停止，不会把后续评测误报为已完成。
 
 当前统一配置沿用已完成 AIME run 的生成协议，但把 `samples_per_problem` 和 `avg_at` 都设为
 8，只进行 Avg@8，不再生成 Avg@32 所需的额外样本。输出改到

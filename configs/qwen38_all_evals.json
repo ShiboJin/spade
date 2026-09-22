@@ -31,7 +31,7 @@
     "wandb_enabled": true,
     "wandb_project": "spade",
     "wandb_group": "qwen38-all-evals",
-    "wandb_name": "qwen38-aime25-aime26-rg-gpqa-lcb",
+    "wandb_name": "qwen38-aime25-aime26-rg-gpqa-lcb-acebench-agent",
     "memory_limit_gib": 80,
     "host_memory_reserve_gib": 48,
     "benchmark": "boxed_integer",
@@ -75,6 +75,16 @@
         "suites": [
           "gem"
         ]
+      },
+      {
+        "name": "acebench",
+        "type": "suite",
+        "context_length": 32768,
+        "config": "eval_offline/configs/acebench_agent.yaml",
+        "suites": [
+          "acebench"
+        ],
+        "max_concurrent": 16
       }
     ]
   }
