@@ -1,5 +1,5 @@
 """Full BFCL v4 eval suite — drives bfcl_eval's NATIVE generation + scoring
-against our already-running SGLang, so we get the categories the single-turn
+against our already-running vLLM, so we get the categories the single-turn
 ``bfcl`` suite can't: multi-turn + agentic (web_search).
 
 Why this exists (vs ``bfcl.py``):
@@ -8,11 +8,11 @@ Why this exists (vs ``bfcl.py``):
     (``execute_multi_turn_func_call``, the web_search tool, etc.). Rather than
     reimplement those, we run the official ``bfcl generate`` / ``bfcl evaluate``
     CLI, pointing BFCL's OpenAI-compatible handler (qwen3-4b-FC -> QwenAPIHandler
-    -> OpenAICompletionsHandler, which honours OPENAI_BASE_URL) at our SGLang.
+    -> OpenAICompletionsHandler, which honours OPENAI_BASE_URL) at our vLLM.
 
 Prereqs handled by the wrapper/sbatch:
-    - SGLang served under the name BFCL sends (qwen3-4b-FC -> model="qwen3-4b"):
-      set SGLANG_SERVED_MODEL_NAME=qwen3-4b (server.py passes --served-model-name).
+    - vLLM served under the name BFCL sends (qwen3-4b-FC -> model="qwen3-4b"):
+      set VLLM_SERVED_MODEL_NAME=qwen3-4b (server.py passes --served-model-name).
     - SERPER_API_KEY in env for web_search (web_search.py patched SerpAPI->Serper).
     - bfcl_eval source on PYTHONPATH (run_offline_eval.sh).
 
@@ -37,6 +37,15 @@ logger = logging.getLogger("eval_offline.suites.bfcl_full")
 _DEFAULT_MODEL_HANDLE = "Qwen/Qwen3-4B-Instruct-2507-FC"
 # BFCL category group keywords (see constants/category_mapping.py TEST_COLLECTION_MAPPING).
 _DEFAULT_CATEGORIES = ["non_live", "live", "multi_turn", "web_search"]
+
+
+def _bfcl_python() -> str:
+    """Use the benchmark venv baked into the unified image when available."""
+    configured = os.environ.get("BFCL_PYTHON", "").strip()
+    bundled = Path("/opt/benchmarks/bfcl-venv/bin/python")
+    if configured:
+        return configured
+    return str(bundled) if bundled.is_file() else sys.executable
 
 
 def _model_handle(cfg: dict) -> str:
@@ -148,12 +157,12 @@ def run(client, cfg: dict, out_dir: Path) -> dict[str, Any]:
     num_threads = int(cfg.get("num_threads", 16))
     temperature = float(cfg.get("temperature", 0.0))
 
-    # Point BFCL's OpenAI-compatible handler at our SGLang. OPENAI_BASE_URL is
+    # Point BFCL's OpenAI-compatible handler at vLLM. OPENAI_BASE_URL is
     # read by OpenAICompletionsHandler; LOCAL_SERVER_* covers the OSS path too.
     env = os.environ.copy()
-    sglang_v1 = f"{client.base_url}/v1"
-    env["OPENAI_BASE_URL"] = sglang_v1
-    env["OPENAI_API_KEY"] = env.get("OPENAI_API_KEY") or "sglang-local"
+    vllm_v1 = f"{client.base_url}/v1"
+    env["OPENAI_BASE_URL"] = vllm_v1
+    env["OPENAI_API_KEY"] = env.get("OPENAI_API_KEY") or "vllm-local"
     host = client.base_url.split("://", 1)[-1].rsplit(":", 1)[0]
     port = client.base_url.rsplit(":", 1)[-1]
     env["LOCAL_SERVER_ENDPOINT"] = host
@@ -163,11 +172,11 @@ def run(client, cfg: dict, out_dir: Path) -> dict[str, Any]:
         logger.warning("[bfcl_full] SERPER_API_KEY not set — web_search will error")
 
     logger.info("[bfcl_full] model=%s base_url=%s categories=%s",
-                model_handle, sglang_v1, cat_arg)
+                model_handle, vllm_v1, cat_arg)
 
-    # 1) Native generation (multi-turn + agentic harness) against our SGLang.
+    # 1) Native generation (multi-turn + agentic harness) against vLLM.
     gen_cmd = [
-        sys.executable, "-m", "bfcl_eval", "generate",
+        _bfcl_python(), "-m", "bfcl_eval", "generate",
         "--model", model_handle,
         "--test-category", cat_arg,
         "--num-threads", str(num_threads),
@@ -183,7 +192,7 @@ def run(client, cfg: dict, out_dir: Path) -> dict[str, Any]:
 
     # 2) Score.
     eval_cmd = [
-        sys.executable, "-m", "bfcl_eval", "evaluate",
+        _bfcl_python(), "-m", "bfcl_eval", "evaluate",
         "--model", model_handle,
         "--test-category", cat_arg,
     ]

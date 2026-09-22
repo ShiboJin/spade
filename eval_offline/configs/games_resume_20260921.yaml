@@ -1,0 +1,7 @@
+# Resume only failed GEM episodes from the 2026-09-21 Qwen3.8-27B run.
+# The full task protocol remains sourced from games.yaml; successful GPQA,
+# LiveCodeBench, and Reasoning-Gym results are retained unchanged.
+suites:
+  gem:
+    config_path: eval_offline/configs/games.yaml
+    resume_raw_result: outputs/evaluation/resume_inputs/qwen38_20260921_gem_raw_result.json

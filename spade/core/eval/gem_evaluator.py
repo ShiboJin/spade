@@ -9,6 +9,7 @@ unlike single-turn JSONL eval. This evaluator runs the full gameplay loop.
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from collections import defaultdict
@@ -184,12 +185,45 @@ def _build_initial_prompt(
     )
 
 
-def _parse_action(response: str) -> str:
-    """Pass raw model response as action.
+def _parse_action(response: str, task_id: Optional[str] = None) -> str:
+    """Return the environment action, normalizing known protocol mismatches.
 
-    GEM's concat wrapper handles \\boxed{} extraction internally,
-    so we pass the full response through.
+    SPADE's Reasoning-Gym wrapper normally extracts either ``<answer>`` or
+    ``\\boxed{}`` itself.  ``prime_factorization`` is a special case because its
+    scorer accepts only the literal Unicode multiplication sign (``×``). Qwen
+    may put a LaTeX box inside the requested answer tags and use ``\\times``;
+    leaving that untouched raises ``ValueError`` instead of producing a score.
     """
+    if not task_id or not task_id.startswith("rg:prime_factorization-"):
+        return response
+
+    tagged = re.findall(
+        r"<answer>\s*(.*?)\s*</answer>", response, re.DOTALL | re.IGNORECASE
+    )
+    if tagged:
+        answer = tagged[-1].strip()
+    else:
+        from gem.utils.parsing import extract_last_boxed_answer
+
+        extracted = extract_last_boxed_answer(response)
+        if extracted is None:
+            return response
+        answer = extracted.strip()
+
+    # Unwrap one or more simple nested boxes, e.g.
+    # <answer>\\boxed{2 \\times 3}</answer>.  The factorization answer itself
+    # contains no braces, so this intentionally conservative expression is
+    # sufficient and cannot consume unrelated reasoning text.
+    boxed = re.compile(r"^\s*\\(?:boxed|fbox)\{([^{}]*)\}\s*$", re.DOTALL)
+    while True:
+        match = boxed.match(answer)
+        if not match:
+            break
+        answer = match.group(1).strip()
+
+    answer = re.sub(r"\s*\\(?:times|cdot)\s*", " × ", answer)
+    answer = re.sub(r"\s*\*\s*", " × ", answer)
+    return f"<answer>{answer.strip()}</answer>"
     return response
 
 
@@ -211,9 +245,13 @@ class GemEvaluator:
         self,
         model: ModelAdapter,
         max_concurrent: int = 16,
+        generation_timeout_seconds: float = 600.0,
     ):
         self.model = model
         self.max_concurrent = max_concurrent
+        if generation_timeout_seconds <= 0:
+            raise ValueError("generation_timeout_seconds must be positive")
+        self.generation_timeout_seconds = generation_timeout_seconds
 
     async def _play_episode(
         self, task_spec: GemTaskSpec, episode_idx: int
@@ -299,7 +337,7 @@ class GemEvaluator:
                     presence_penalty=0.0,
                     max_tokens=gen_max_tokens,
                     session_id=session_id,
-                ), timeout=600)
+                ), timeout=self.generation_timeout_seconds)
 
                 result = results[0] if results else {}
                 response_text = result.get("text", "")
@@ -309,7 +347,7 @@ class GemEvaluator:
                 response_tokens = result.get("token_ids", [])
                 all_tokens.extend(response_tokens)
 
-                action = _parse_action(response_text)
+                action = _parse_action(response_text, task_spec.task_id)
                 obs, reward, terminated, truncated, info = env.step(action)
                 # Append suffix (e.g., board state) from env
                 suffix = info.get("suffix", "")
@@ -327,8 +365,8 @@ class GemEvaluator:
 
         except Exception as e:
             logger.error(
-                "[GEM-EVAL] Error playing %s episode %d: %s",
-                task_spec.task_id, episode_idx, e,
+                "[GEM-EVAL] Error playing %s episode %d: %s: %s",
+                task_spec.task_id, episode_idx, type(e).__name__, e,
             )
             raise
 
@@ -397,8 +435,8 @@ class GemEvaluator:
                     task_turns[key].append(num_turns)
                 except Exception as e:
                     logger.error(
-                        "[GEM-EVAL] Episode %d of %s%s failed: %s",
-                        ep_idx, spec.task_id, spec.metric_suffix, e,
+                        "[GEM-EVAL] Episode %d of %s%s failed: %s: %s",
+                        ep_idx, spec.task_id, spec.metric_suffix, type(e).__name__, e,
                     )
                     task_errors[key] += 1
                 finally:

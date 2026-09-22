@@ -4,16 +4,16 @@
     "memory_limit_gib": 160,
     "host_memory_reserve_gib": 48,
     "gpu_ids": [
-      0,
-      1,
-      2,
-      3
+      4,
+      5,
+      6,
+      7
     ],
     "model": "checkpoints/Qwen3.8-27B",
     "dataset": "data/envduels/envduels-4x200-qwen-non-00-swift.jsonl",
     "export_dir": "data/envduels/exports/envduels_4x200_qwen_non_00",
-    "author": "qwen3.8-27b",
-    "output_dir": "outputs/training/qwen3.8-27b-author",
+    "author": "inkling-small",
+    "output_dir": "outputs/training-smoke/inkling-small-author",
     "fixed_pool_seed": 42,
     "fixed_pool_epochs": 1,
     "max_steps": null,
@@ -66,9 +66,9 @@
     "wandb_mode": "online",
     "wandb_project": "envduels",
     "wandb_entity": null,
-    "wandb_run_name": "qwen38-27b-lora-grpo-a10080-4gpu-qwen-non-00",
+    "wandb_run_name": "qwen38-27b-lora-grpo-a10080-4gpu-inkling-author-smoke",
     "resume_from_checkpoint": null,
-    "save_every": 5,
+    "save_every": 1,
     "save_total_limit": 3
   },
   "accelerate": {

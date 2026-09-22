@@ -1,0 +1,8 @@
+diff --git a/swift/arguments/rlhf_args.py b/swift/arguments/rlhf_args.py
+--- a/swift/arguments/rlhf_args.py
++++ b/swift/arguments/rlhf_args.py
+@@ -164,3 +164,4 @@ class GRPOArguments(GRPOArgumentsMixin):
+     reward_funcs: List[str] = field(default_factory=list)
+     reward_weights: List[float] = None
+     log_completions: bool = False
++    disable_dropout: bool = False

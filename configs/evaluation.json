@@ -37,8 +37,8 @@
       "image": 0,
       "video": 0
     },
-    "max_concurrent_problems": 20,
-    "request_timeout_seconds": 1800,
+    "max_concurrent_problems": 32,
+    "request_timeout_seconds": 3600,
     "startup_timeout_seconds": 1200,
     "memory_limit_gib": 80
   }

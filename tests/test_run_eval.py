@@ -8,13 +8,21 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from scripts.run_eval import ROOT, build_server_command, docker_command, load_config, load_dataset, score_dataset
+from scripts.run_eval import (
+    ROOT, _container_config, _server_groups, build_server_command, docker_command,
+    load_config, load_dataset, score_dataset,
+)
 from scripts.benchmark_data import grade
 from scripts.memory_guard import task_resources as evaluation_resources, concurrent_preflight as evaluation_preflight
 from scripts.memory_guard import launch_lock, GIB
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_default_aime_concurrency(self):
+        cfg = self.config()
+        self.assertEqual(cfg["max_concurrent_problems"], 32)
+        self.assertEqual(cfg["max_num_seqs"], 160)
+
     def test_eval_gpu_reservations_and_legacy_exclusion(self):
         with tempfile.TemporaryDirectory() as directory, patch("scripts.memory_guard.concurrent_preflight") as check:
             root = Path(directory)
@@ -100,7 +108,7 @@ class EvaluationTests(unittest.TestCase):
                 self.dataset(rows)
 
     def test_invalid_config(self):
-        for override in (dict(gpu_ids=[0, 0]), dict(samples_per_problem=0), dict(tensor_parallel=2),
+        for override in (dict(gpu_ids=[0, 0]), dict(samples_per_problem=0), dict(tensor_parallel=3),
                          dict(temperature=0), dict(top_p=float("nan")), dict(max_problems=0),
                          dict(max_tokens=12288), dict(enforce_eager="false")):
             with self.subTest(override=override), self.assertRaises(ValueError):
@@ -178,6 +186,74 @@ class EvaluationTests(unittest.TestCase):
         rows = [dict(id="x", answer=7, messages=[dict(role="user", content="question")])]
         with self.assertRaisesRegex(RuntimeError, "expected 8 samples"):
             asyncio.run(score_dataset(Client(), rows, self.config(), io.StringIO()))
+
+    def test_ordered_mixed_evaluations_and_cli_selection(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root = Path(directory)
+            first = root / "first.jsonl"
+            second = root / "second.jsonl"
+            record = json.dumps(dict(id="q", problem="Q", answer=1))
+            first.write_text(record)
+            second.write_text(record)
+            suite = root / "suite.yaml"
+            suite.write_text("suites:\n  gem: {}\n")
+            config = root / "sequence.json"
+            config.write_text(json.dumps({"evaluation": {
+                "checkpoint": "checkpoints/Qwen3.8-27B",
+                "evaluations": [
+                    {"name": "aime25", "type": "jsonl", "data": str(first)},
+                    {"name": "aime26", "type": "jsonl", "data": str(second)},
+                    {"name": "gem", "type": "suite", "config": str(suite),
+                     "suites": ["gem"]},
+                ],
+            }}))
+            cfg = load_config(config, selected=["aime26", "aime25", "gem"])
+            self.assertEqual(
+                [entry["name"] for entry in cfg["evaluations"]],
+                ["aime26", "aime25", "gem"],
+            )
+            self.assertFalse(cfg["_legacy_single"])
+            container = _container_config(cfg)
+            self.assertEqual(
+                [entry["data"] for entry in container["evaluations"][:2]],
+                ["/datasets/01-aime26.jsonl", "/datasets/02-aime25.jsonl"],
+            )
+            self.assertEqual(
+                container["evaluations"][2]["config"],
+                "/workspace/spade/" + str(suite.relative_to(ROOT)),
+            )
+
+    def test_sequence_rejects_bad_names_and_unknown_selection(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root = Path(directory)
+            data = root / "data.jsonl"
+            data.write_text(json.dumps(dict(id="q", problem="Q", answer=1)))
+            config = root / "sequence.json"
+            for name in ("bad name", "../escape"):
+                config.write_text(json.dumps({"evaluation": {
+                    "checkpoint": "checkpoints/Qwen3.8-27B",
+                    "evaluations": [{"name": name, "data": str(data)}],
+                }}))
+                with self.assertRaisesRegex(ValueError, "name must match"):
+                    load_config(config)
+            config.write_text(json.dumps({"evaluation": {
+                "checkpoint": "checkpoints/Qwen3.8-27B",
+                "evaluations": [{"name": "aime25", "data": str(data)}],
+            }}))
+            with self.assertRaisesRegex(ValueError, "Unknown --evals"):
+                load_config(config, selected=["gem"])
+
+    def test_context_changes_split_server_groups(self):
+        cfg = load_config(ROOT / "configs/qwen38_all_evals.json")
+        self.assertEqual(
+            [entry["context_length"] for entry in cfg["evaluations"]],
+            [40960, 40960, 32768],
+        )
+        groups = _server_groups(cfg["evaluations"])
+        self.assertEqual(
+            [[entry["name"] for _, entry in group] for group in groups],
+            [["aime25", "aime26"], ["gem"]],
+        )
 
     def test_dry_run_never_starts_docker_or_creates_output(self):
         from scripts.run_eval import main

@@ -1,7 +1,7 @@
-"""Manage a single SGLang HTTP server subprocess for offline eval.
+"""Manage a single vLLM HTTP server subprocess for offline eval.
 
-Spawns `python -m sglang.launch_server`, waits for /health, exposes the URL,
-and shuts it down on context exit.
+Spawns vLLM's OpenAI-compatible API server, waits for /health, exposes the
+URL, and shuts it down on context exit.
 """
 
 from __future__ import annotations
@@ -21,15 +21,16 @@ logger = logging.getLogger(__name__)
 
 
 @contextmanager
-def sglang_server(
+def vllm_server(
     model_path: Path,
     *,
     port: int = 30000,
     host: str = "127.0.0.1",
     tp: int = 1,
     dp: int = 1,
-    mem_fraction_static: float = 0.7,
-    tool_call_parser: str | None = "qwen",
+    gpu_memory_utilization: float = 0.7,
+    tool_call_parser: str | None = None,
+    reasoning_parser: str | None = None,
     log_path: Path | None = None,
     startup_timeout: int = 600,
     extra_args: list[str] | None = None,
@@ -39,22 +40,51 @@ def sglang_server(
     On exit (success or exception), terminates the subprocess.
     """
     cmd = [
-        sys.executable, "-m", "sglang.launch_server",
-        "--model-path", str(model_path),
+        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+        "--model", str(model_path),
         "--host", host, "--port", str(port),
-        "--tp", str(tp), "--dp", str(dp),
-        "--mem-fraction-static", str(mem_fraction_static),
+        "--tensor-parallel-size", str(tp),
+        "--data-parallel-size", str(dp),
+        "--gpu-memory-utilization", str(gpu_memory_utilization),
         "--trust-remote-code",
     ]
-    # Optionally pin the OpenAI `model` name SGLang serves under. Needed when a
+    # Optionally pin the OpenAI `model` name vLLM serves under. Needed when a
     # downstream harness sends a fixed model id (e.g. BFCL's qwen3-4b-FC handle
     # sends model="qwen3-4b") that must match the served name. Default behaviour
     # (unset) leaves it as the model-path string, which the driver then queries.
-    _served_name = os.getenv("SGLANG_SERVED_MODEL_NAME")
+    _served_name = os.getenv("VLLM_SERVED_MODEL_NAME")
     if _served_name:
         cmd += ["--served-model-name", _served_name]
+    if tool_call_parser is None:
+        tool_call_parser = os.getenv("VLLM_TOOL_CALL_PARSER", "").strip() or None
     if tool_call_parser:
-        cmd += ["--tool-call-parser", tool_call_parser]
+        cmd += [
+            "--enable-auto-tool-choice",
+            "--tool-call-parser", tool_call_parser,
+        ]
+    if reasoning_parser is None:
+        reasoning_parser = os.getenv("VLLM_REASONING_PARSER", "").strip() or None
+    if reasoning_parser:
+        cmd += ["--reasoning-parser", reasoning_parser]
+    attention_backend = os.getenv("VLLM_ATTENTION_BACKEND", "").strip()
+    if attention_backend:
+        cmd += ["--attention-backend", attention_backend]
+    max_model_len = os.getenv("VLLM_MAX_MODEL_LEN", "").strip()
+    if max_model_len:
+        cmd += ["--max-model-len", max_model_len]
+    max_num_seqs = os.getenv("VLLM_MAX_NUM_SEQS", "").strip()
+    if max_num_seqs:
+        cmd += ["--max-num-seqs", max_num_seqs]
+    max_num_batched_tokens = os.getenv(
+        "VLLM_MAX_NUM_BATCHED_TOKENS", ""
+    ).strip()
+    if max_num_batched_tokens:
+        cmd += ["--max-num-batched-tokens", max_num_batched_tokens]
+    dtype = os.getenv("VLLM_DTYPE", "").strip()
+    if dtype:
+        cmd += ["--dtype", dtype]
+    if os.getenv("VLLM_ENFORCE_EAGER", "").lower() in {"1", "true", "yes"}:
+        cmd += ["--enforce-eager"]
     if extra_args:
         cmd += list(extra_args)
 
@@ -79,7 +109,7 @@ def sglang_server(
         )
         yield base_url, model_name
     finally:
-        logger.info("[server] terminating SGLang (pid=%s)", proc.pid)
+        logger.info("[server] terminating vLLM (pid=%s)", proc.pid)
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         except ProcessLookupError:
@@ -87,7 +117,7 @@ def sglang_server(
         try:
             proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
-            logger.warning("[server] SGLang didn't exit in 30s; SIGKILL")
+            logger.warning("[server] vLLM didn't exit in 30s; SIGKILL")
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except ProcessLookupError:
@@ -103,7 +133,7 @@ def _wait_for_health(base_url: str, *, timeout: int, proc: subprocess.Popen) -> 
     while time.time() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(
-                f"SGLang exited early with code {proc.returncode} before health OK; "
+                f"vLLM exited early with code {proc.returncode} before health OK; "
                 f"see server log."
             )
         try:
@@ -114,7 +144,7 @@ def _wait_for_health(base_url: str, *, timeout: int, proc: subprocess.Popen) -> 
             last_err = str(e)
         time.sleep(2)
     raise TimeoutError(
-        f"SGLang /health did not return 200 within {timeout}s. Last error: {last_err}"
+        f"vLLM /health did not return 200 within {timeout}s. Last error: {last_err}"
     )
 
 
@@ -125,3 +155,8 @@ def _query_model_name(base_url: str) -> str:
     if not data:
         raise RuntimeError("/v1/models returned empty data list")
     return data[0]["id"]
+
+
+# Backward-compatible import for older launchers. New code should use
+# ``vllm_server``; this alias never starts SGLang.
+sglang_server = vllm_server

@@ -1,0 +1,40 @@
+{
+  "evaluation": {
+    "checkpoint": "../spade/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "output_dir": "outputs/evaluation/qwen38-benchmarks",
+    "hf_cache_dir": "../spade-workspace/hf",
+    "image": "envduels-unified:cu124",
+    "gpu_ids": [
+      8,
+      9
+    ],
+    "tensor_parallel": 2,
+    "data_parallel": 1,
+    "dtype": "bfloat16",
+    "context_length": 32768,
+    "gpu_memory_utilization": 0.8,
+    "max_num_seqs": 64,
+    "max_num_batched_tokens": 4096,
+    "enforce_eager": true,
+    "max_concurrent": 64,
+    "request_timeout_seconds": 3600,
+    "startup_timeout_seconds": 1800,
+    "reasoning_parser": "qwen3",
+    "served_model_name": "qwen38-27b-thinking",
+    "wandb_project": "spade",
+    "wandb_group": "qwen38-benchmarks",
+    "wandb_name": "qwen38-27b-thinking-rg-lcb-gpqa",
+    "evaluations": [
+      {
+        "name": "gem",
+        "type": "suite",
+        "config": "eval_offline/configs/games.yaml",
+        "suites": [
+          "gem"
+        ]
+      }
+    ],
+    "memory_limit_gib": 80,
+    "host_memory_reserve_gib": 48
+  }
+}

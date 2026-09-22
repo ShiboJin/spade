@@ -1,6 +1,8 @@
 # 通用 checkpoint 评测
 
-入口：`scripts/run_eval.py`。默认读取 `configs/evaluation.json` 的 `evaluation` 部分。
+统一入口：`scripts/run_eval.py`。它既支持原来的单个 JSONL 评测，也支持按顺序混合运行
+AIME JSONL 与 GEM/ACEBench 等离线 suite。`scripts/run_benchmark_eval.py` 现在只是兼容旧命令的
+转发层，新命令统一使用 `run_eval.py`。
 宿主机只需要 Python 3.10+ 和可使用 GPU 的 Docker；模型推理依赖来自统一的
 `envduels-unified:cu124` 镜像，无需手动启动推理服务。
 
@@ -27,6 +29,61 @@ python scripts/run_eval.py --config configs/evaluation.json \
   --output-dir outputs/my_evaluation
 ```
 
+## 顺序运行多个评测
+
+`configs/qwen38_all_evals.json` 已按以下顺序配置：
+
+1. AIME 2025 Avg@8
+2. AIME 2026 Avg@8
+3. GEM（Reasoning-Gym、LCB-v6、GPQA-D）
+
+完整运行配置中的全部项目：
+
+```bash
+python scripts/run_eval.py --config configs/qwen38_all_evals.json
+```
+
+也可以用一个 `--evals` 后跟多个名字来选择项目并明确执行顺序。例如只运行 AIME25、
+AIME26 和 GEM，并保证前一个结束后才开始下一个：
+
+```bash
+python scripts/run_eval.py \
+  --config configs/qwen38_all_evals.json \
+  --evals aime25 aime26 gem
+```
+
+只验证一题、一次采样，不启动完整 suite：
+
+```bash
+python scripts/run_eval.py \
+  --config configs/qwen38_all_evals.json \
+  --evals aime25 \
+  --max-problems 1 \
+  --samples-per-problem 1
+```
+
+先做完整的宿主机配置、模型和数据校验但不占 GPU：
+
+```bash
+python scripts/run_eval.py \
+  --config configs/qwen38_all_evals.json \
+  --evals aime25 aime26 gem \
+  --dry-run
+```
+
+`evaluations` 数组中的每个元素必须有唯一的 `name`。JSONL 项使用 `type: "jsonl"`
+和 `data`；离线 suite 使用 `type: "suite"`、`config` 和 `suites`。数组顺序是默认运行顺序，
+`--evals` 的参数顺序会覆盖它。相邻且 `context_length` 相同的项目复用一个 vLLM；配置变化时
+自动重启服务。当前 AIME25/26 共用 40960 上下文服务，随后只重启一次，以 32768 上下文运行
+GEM。GEM 配置只包含 Reasoning-Gym 的 math、algorithmic、cognition、logic 四类，以及
+GPQA-D 和 LCB-v6，不再运行 ACEBench。任何一步失败时立即停止，不会把后续评测误报为已完成。
+
+当前统一配置沿用已完成 AIME run 的生成协议，但把 `samples_per_problem` 和 `avg_at` 都设为
+8，只进行 Avg@8，不再生成 Avg@32 所需的额外样本。输出改到
+`outputs/evaluation/qwen38-all`，GPU 改为 8、9。AIME 数据仍使用已验证的本地文件：
+`/home/yzo/home/spade/workspace/aime-2025/aime-2025.jsonl` 和
+`/home/yzo/home/spade/workspace/aime-2026/aime-2026.jsonl`。
+
 直接运行即开始评测；只有 `--dry-run` 不会启动模型。
 `--max-problems 1 --samples-per-problem 1` 可进一步缩短链路验证，但此时只计算 pass@1。
 每题最多生成 `max_tokens` 个 token；一道题也可能需要较长时间。
@@ -49,6 +106,10 @@ python scripts/run_eval.py --config configs/evaluation.json \
 | `gpu_ids` / `tensor_parallel` | 可见 GPU 编号及张量并行数，两者数量需一致 |
 | `chat_template_kwargs` | 模型聊天模板参数；当前 Qwen 使用非 thinking 模式 |
 | `max_tokens` / `context_length` | 单条回答上限 / 输入加输出的总上下文长度 |
+| `evaluations` | 多评测有序列表；不设置时保持单个 `data` 的旧行为 |
+| `max_concurrent` | `eval_offline` suite 的客户端并发上限 |
+| `port` / `served_model_name` | 共享 vLLM 服务端口及请求中的模型名 |
+| `wandb_enabled` | 是否把整个有序评测作为一个 W&B run 记录 |
 
 配置中的 checkpoint、data、output_dir 以及相应命令行覆盖值，相对路径均以 **spade 根目录**
 为基准，与执行命令时所在目录无关；也支持绝对路径。`--config` 本身的相对路径按当前工作目录解析。
@@ -84,7 +145,8 @@ checkpoint 始终是完整 HF 基础模型。LoRA 目录通过 `lora` 或命令�
 
 ## 输出与比较
 
-每次运行生成 `outputs/evaluation/<UTC时间戳>/`，主要包含：
+每次运行生成 `outputs/evaluation/<UTC时间戳>/`。单评测保持原目录布局；多评测会生成
+`01-aime25/`、`02-aime26/`、`03-gem/` 这样的有序子目录。主要包含：
 
 - `scores.json`：全部选中题目成功完成后才写入最终分数。
 - `responses.jsonl`：每题每次采样的回答、标准答案、预测答案、是否正确、结束原因。
@@ -92,6 +154,8 @@ checkpoint 始终是完整 HF 基础模型。LoRA 目录通过 `lora` 或命令�
 - `launch.json` / `runtime.json`：Docker 镜像 ID 和推理依赖版本。
 - `console.log` / `server.log`：进度和推理服务日志；启动后会打印日志路径。
 - `status.json`：running、completed、failed 或 interrupted。
+- `sequence_status.json`：当前正在运行哪一步，以及已完成的评测。
+- `sequence_results.json`：每完成一步立即更新的汇总和耗时。
 
 `pass_at_8` 是每题恰好生成 8 个回答、至少一个正确的题目比例；`avg_at_8` 是所有回答的平均正确率。
 分数范围为 0 到 1。同时记录无法提取答案的比例和因长度上限截断的比例。

@@ -1,4 +1,4 @@
-"""Async OpenAI-compatible client for the SGLang server."""
+"""Async OpenAI-compatible client for the vLLM server."""
 
 from __future__ import annotations
 
@@ -38,23 +38,40 @@ class OfflineClient:
         base_url: str,
         model: str,
         *,
+        model_path: str | None = None,
         api_key: str = "EMPTY",
         max_concurrent: int = 64,
         max_retries: int = 10,
         max_retry_delay: float = 30.0,
+        request_timeout_seconds: float | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
+        # The served OpenAI model id may be a short alias. Suites that need
+        # local tokenizer/config files must use the checkpoint path instead.
+        self.model_path = model_path
         self.max_retries = max_retries
         self.max_retry_delay = max_retry_delay
         self._max_concurrent = max_concurrent
+        if request_timeout_seconds is None:
+            request_timeout_seconds = float(
+                os.getenv("SPADE_EVAL_REQUEST_TIMEOUT_SECONDS", "600")
+            )
+        if request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be positive")
+        self.request_timeout_seconds = request_timeout_seconds
         # Semaphores are loop-bound, so concurrent suites need per-loop instances.
         self._sems_by_loop_id: dict[int, asyncio.Semaphore] = {}
         http_client = httpx.AsyncClient(
             follow_redirects=True,
-            timeout=httpx.Timeout(connect=30.0, read=600.0, write=60.0, pool=60.0),
+            timeout=httpx.Timeout(
+                connect=30.0,
+                read=request_timeout_seconds,
+                write=60.0,
+                pool=60.0,
+            ),
         )
-        # Keyless SGLang endpoints ignore the token ("EMPTY" is fine), but
+        # Keyless local vLLM endpoints ignore the token ("EMPTY" is fine), but
         # authenticated APIs need a real bearer key. When the caller left the
         # default placeholder, pull the right key from the env based on the host.
         if api_key == "EMPTY":
@@ -78,6 +95,10 @@ class OfflineClient:
             sem = asyncio.Semaphore(self._max_concurrent)
             self._sems_by_loop_id[id(loop)] = sem
         return sem
+
+    @property
+    def max_concurrent(self) -> int:
+        return self._max_concurrent
 
     @property
     def openai_client(self) -> openai.AsyncOpenAI:

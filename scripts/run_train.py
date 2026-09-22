@@ -351,7 +351,26 @@ def write_selected_dataset(cfg: dict, path: Path) -> None:
     path.write_text("".join(selected_lines), encoding="utf-8")
 
 
-def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[str], Path]:
+def docker_is_rootless() -> bool:
+    """Return whether the active Docker daemon uses rootless user mapping."""
+    options = json.loads(subprocess.check_output(
+        ["docker", "info", "--format", "{{json .SecurityOptions}}"],
+        text=True,
+        timeout=15,
+    ))
+    return any(str(option) in ("rootless", "name=rootless") for option in options)
+
+
+def container_user_args(rootless: bool) -> list[str]:
+    # With rootless Docker, container uid 0 maps to the unprivileged daemon
+    # owner. Passing the host uid remaps it into a subordinate uid which cannot
+    # write ordinary host-owned bind mounts.
+    return [] if rootless else ["--user", f"{os.getuid()}:{os.getgid()}"]
+
+
+def docker_command(
+    cfg: dict, run_dir: Path, container_name: str, rootless: bool = False,
+) -> tuple[list[str], Path]:
     checkpoint_dir = run_dir / "checkpoint"
     training_dataset = run_dir / "selected_dataset.jsonl" if cfg["author"] is not None else cfg["dataset"]
     online_wandb = cfg["wandb_enabled"] and cfg["wandb_mode"] == "online"
@@ -360,7 +379,9 @@ def docker_command(cfg: dict, run_dir: Path, container_name: str) -> tuple[list[
         "--gpus", '"device=' + ",".join(map(str, cfg["gpu_ids"])) + '"',
         "--network", "bridge" if online_wandb else "none", "--shm-size", "16g",
         "--ulimit", "memlock=-1", "--ulimit", "stack=67108864",
-        "--user", f"{os.getuid()}:{os.getgid()}",
+    ]
+    command += container_user_args(rootless)
+    command += [
         "--mount", f"type=bind,src={ROOT},dst={CONTAINER_ROOT}",
         "--mount", f"type=bind,src={cfg['export_dir']},dst={CONTAINER_EXPORT},readonly",
         "--workdir", str(CONTAINER_ROOT),
@@ -497,13 +518,15 @@ def main() -> None:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     run_dir = cfg["output_dir"] / stamp
     container_name = "spade-train-" + stamp.lower()
-    command, checkpoint_dir = docker_command(cfg, run_dir, container_name)
+    rootless = docker_is_rootless()
+    command, checkpoint_dir = docker_command(cfg, run_dir, container_name, rootless=rootless)
     report = {
         "config": report_config(cfg),
         "mode": "smoke" if args.smoke else "train",
         "output": str(run_dir),
         "checkpoint_output": str(checkpoint_dir),
         "container": container_name,
+        "docker_rootless": rootless,
         "command": command,
     }
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)

@@ -1,6 +1,6 @@
 """tau2-bench suite — shim around spade.core.eval.tau2_evaluator.
 
-The tau2 evaluator hits SGLang via OpenAI-compatible HTTP for the agent
+The tau2 evaluator hits vLLM via OpenAI-compatible HTTP for the agent
 side, and OpenRouter (or OpenAI directly) for the user simulator.
 
 Config:
@@ -64,12 +64,15 @@ def run(client, cfg: dict, out_dir: Path) -> dict[str, Any]:
         logger.warning("[tau2] config has no tau2_eval section / no specs — skipped")
         return {"skipped": True}
 
-    sglang_base_url = f"{client.base_url}/v1"
-    evaluator = Tau2Evaluator(sglang_base_url=sglang_base_url)
+    vllm_base_url = f"{client.base_url}/v1"
+    evaluator = Tau2Evaluator(
+        vllm_base_url=vllm_base_url,
+        model_name=client.model,
+    )
 
     logger.info(
         "[tau2] running %d specs against %s (user sim via OpenRouter/OpenAI)",
-        len(specs), sglang_base_url,
+        len(specs), vllm_base_url,
     )
     eval_result = asyncio.run(evaluator.evaluate_all(specs))
 

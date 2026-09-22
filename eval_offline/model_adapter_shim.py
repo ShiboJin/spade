@@ -1,12 +1,12 @@
 """ModelAdapter shim for offline eval.
 
-Adapts our `OfflineClient` (SGLang HTTP) to the `spade.core.model_adapter.ModelAdapter`
+Adapts our `OfflineClient` (vLLM HTTP) to the `spade.core.model_adapter.ModelAdapter`
 protocol so the existing `GemEvaluator` and `tau2_evaluator` can be reused without
 modification.
 
 The shim:
 - Loads the HF tokenizer from the local model dir.
-- `apply_template`: uses tokenizer.apply_chat_template (matches SGLang's
+- `apply_template`: uses tokenizer.apply_chat_template (matches vLLM's
   server-side tokenization).
 - `generate_async`: calls /v1/chat/completions on the OfflineClient, then
   re-tokenizes the text locally to populate `token_ids`. Logprobs are
@@ -82,7 +82,7 @@ class OfflineModelAdapter:
         """Call /v1/chat/completions and shape the response into the dict
         format expected by spade.core.eval.* (text, token_ids, logprobs,
         prompt_token_ids)."""
-        # Pull SGLang-specific kwargs into extra_body and drop kwargs that
+        # Pull vLLM sampling extensions into extra_body and drop kwargs that
         # the OpenAI client doesn't accept.
         extra_body: dict[str, Any] = {}
         if "top_k" in kwargs:

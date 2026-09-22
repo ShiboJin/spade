@@ -6,9 +6,9 @@ both GEM and tau2 metrics cluster in one W&B group.
 
 Unlike the GEM evaluator (which drives reset()/step() directly via our
 ModelAdapter), this evaluator delegates to tau2's native ``run_tasks``
-loop. The trained model is served over HTTP by sglang (behind the slime
-router) and is called by tau2's ``LLMAgent`` via LiteLLM's ``openai/``
-provider path. Tool calls are parsed server-side by sglang's Qwen tool
+loop. The trained model is served over HTTP by vLLM and is called by tau2's
+``LLMAgent`` via LiteLLM's ``openai/``
+provider path. Tool calls are parsed server-side by vLLM's Qwen tool
 parser and returned as standard OpenAI ``message.tool_calls``. The user
 simulator is routed to OpenRouter via LiteLLM.
 
@@ -87,11 +87,11 @@ def _override_tau2_nl_judge(model: str) -> None:
     logger.info("[TAU2-EVAL] NL-assertion judge overridden to: %s", model)
 
 
-# LiteLLM label for our sglang-served model. SGLang ignores the request-body
-# ``model`` field (one model per instance); LiteLLM uses the ``openai/`` prefix
-# for provider routing. Keeping this out of LiteLLM's cost registry avoids
-# noisy fake-cost log lines.
-SGLANG_MODEL_NAME = "openai/sglang-local"
+# LiteLLM uses the ``openai/`` prefix to route an arbitrary served model to an
+# OpenAI-compatible endpoint. The concrete vLLM model id is set per evaluator.
+VLLM_MODEL_NAME = "openai/vllm-local"
+# Compatibility for callers importing the old constant. It now names vLLM.
+SGLANG_MODEL_NAME = VLLM_MODEL_NAME
 
 # The default matches tau2's no-retry evaluation protocol.
 _TAU2_NUM_RETRIES = int(os.environ.get("TAU2_NUM_RETRIES", "0"))
@@ -179,15 +179,13 @@ def _quiet_noisy_loggers() -> None:
 class Tau2Evaluator:
     """Evaluates the trained model on tau2-bench domains via tau2.run.run_tasks.
 
-    The evaluator hits our sglang HTTP endpoint (via the slime router)
+    The evaluator hits our vLLM HTTP endpoint
     as the agent and OpenRouter as the user simulator. It computes
     strict Pass@1 per spec and aggregates into ``Tau2EvalResult``.
 
     Args:
-        sglang_base_url: Base URL of the slime router exposing sglang's
-            OpenAI-compat chat/completions endpoint. Must already
-            include the ``/v1`` suffix (e.g. ``http://10.0.0.1:8000/v1``).
-            The slime router's catch-all proxy forwards this to sglang.
+        vllm_base_url: Base URL exposing vLLM's OpenAI-compatible endpoint.
+            Must already include the ``/v1`` suffix.
         openrouter_api_key: OpenRouter API key. If ``None``, reads from
             ``$OPENROUTER_API_KEY``. Missing key raises ``RuntimeError``.
         openrouter_api_base: Override for OpenRouter base URL (useful
@@ -198,12 +196,23 @@ class Tau2Evaluator:
 
     def __init__(
         self,
-        sglang_base_url: str,
+        vllm_base_url: Optional[str] = None,
         openrouter_api_key: Optional[str] = None,
         openrouter_api_base: str = DEFAULT_OPENROUTER_API_BASE,
         branch_timeout_sec: float = DEFAULT_BRANCH_TIMEOUT_SEC,
+        model_name: Optional[str] = None,
+        *,
+        sglang_base_url: Optional[str] = None,
     ) -> None:
-        self.sglang_base_url = sglang_base_url
+        # ``sglang_base_url`` is retained only so old configs do not break; it
+        # is treated as a vLLM endpoint and never starts or imports SGLang.
+        self.vllm_base_url = vllm_base_url or sglang_base_url
+        if not self.vllm_base_url:
+            raise ValueError("vllm_base_url is required")
+        served_name = model_name or os.environ.get("VLLM_SERVED_MODEL_NAME")
+        self.vllm_model_name = (
+            f"openai/{served_name}" if served_name else VLLM_MODEL_NAME
+        )
         self.openrouter_api_base = openrouter_api_base
         self.branch_timeout_sec = branch_timeout_sec
 
@@ -289,7 +298,7 @@ class Tau2Evaluator:
         assert run_tasks is not None  # narrowing
         # Forward sampling overrides only when they are explicitly positive.
         agent_llm_args: Dict[str, Any] = {
-            "api_base": self.sglang_base_url,
+            "api_base": self.vllm_base_url,
             "api_key": "dummy",
             "temperature": spec.agent_temperature,
             "max_tokens": spec.agent_max_tokens,
@@ -306,7 +315,7 @@ class Tau2Evaluator:
             tasks=tasks,
             agent="llm_agent",
             user="user_simulator",
-            llm_agent=SGLANG_MODEL_NAME,
+            llm_agent=self.vllm_model_name,
             llm_args_agent=agent_llm_args,
             llm_user=spec.user_llm,
             llm_args_user=self._resolve_user_llm_args(spec),

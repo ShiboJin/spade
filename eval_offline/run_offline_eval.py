@@ -1,4 +1,4 @@
-"""Offline-eval driver: spin up SGLang once, run all configured suites,
+"""Offline-eval driver: spin up vLLM once, run all configured suites,
 aggregate results.
 
 Usage (inside container):
@@ -27,7 +27,7 @@ import yaml
 from eval_offline.ckpt_resolver import resolve_ckpt
 from eval_offline.client import OfflineClient
 from eval_offline.results import RunResult, SuiteResult, now_iso
-from eval_offline.server import sglang_server
+from eval_offline.server import vllm_server
 from eval_offline.suites import load_suite
 
 
@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
                         "Required unless --base-url is given.")
     p.add_argument("--base-url", default=None,
                    help="Use an existing OpenAI-compatible endpoint instead "
-                        "of launching SGLang locally. When "
+                        "of launching vLLM locally. When "
                         "set, --ckpt is optional and only used as a label.")
     p.add_argument("--served-model-name", default=None,
                    help="model field to send in chat requests when using "
@@ -69,8 +69,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-concurrent", type=int, default=64)
     p.add_argument("--server-startup-timeout", type=int, default=600)
     p.add_argument(
-        "--mem-fraction-static", type=float, default=0.7,
-        help="SGLang --mem-fraction-static")
+        "--gpu-memory-utilization", "--mem-fraction-static",
+        dest="gpu_memory_utilization", type=float, default=0.7,
+        help="vLLM --gpu-memory-utilization (the old flag is an alias)")
+    p.add_argument(
+        "--tool-call-parser", default=None,
+        help="Enable vLLM auto tool choice with this parser, e.g. qwen3_xml. "
+             "Defaults to $VLLM_TOOL_CALL_PARSER when set.")
+    p.add_argument(
+        "--reasoning-parser", default=None,
+        help="vLLM reasoning parser, e.g. qwen3. Defaults to "
+             "$VLLM_REASONING_PARSER when set.")
     p.add_argument("--smoke", action="store_true",
                    help="Just spin up the server, hit /v1/models, exit 0")
     return p.parse_args()
@@ -169,13 +178,15 @@ def main() -> int:
             args.base_url, args.served_model_name or ckpt_label
         )
     else:
-        server_ctx = sglang_server(
+        server_ctx = vllm_server(
             ckpt_path,
             host=args.host,
             port=args.port,
             tp=args.tp,
             dp=dp,
-            mem_fraction_static=args.mem_fraction_static,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            tool_call_parser=args.tool_call_parser,
+            reasoning_parser=args.reasoning_parser,
             log_path=server_log,
             startup_timeout=args.server_startup_timeout,
         )
@@ -189,6 +200,7 @@ def main() -> int:
         client = OfflineClient(
             base_url=base_url,
             model=model_name,
+            model_path=str(ckpt_path) if ckpt_path is not None else None,
             max_concurrent=args.max_concurrent,
         )
 
@@ -292,7 +304,9 @@ def main() -> int:
         except Exception as e:
             logger.warning("[driver] WandB finalize failed: %s", e)
 
-    return 0
+    # A suite failure must propagate to shell launchers; otherwise a chained
+    # benchmark round can silently continue and look successful.
+    return 1 if any(sr.error for sr in run.suites.values()) else 0
 
 
 if __name__ == "__main__":

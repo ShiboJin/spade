@@ -6,11 +6,24 @@ import unittest
 from unittest.mock import patch
 
 from scripts.run_train import (
-    ROOT, ROLLOUT_DEFAULTS, docker_command, load_config, write_selected_dataset,
+    ROOT, ROLLOUT_DEFAULTS, container_user_args, docker_command,
+    docker_is_rootless, load_config, write_selected_dataset,
 )
 
 
 class TrainingLauncherTests(unittest.TestCase):
+    def test_container_identity_handles_rootless_docker_bind_mounts(self):
+        self.assertEqual(container_user_args(True), [])
+        with patch("scripts.run_train.os.getuid", return_value=123), patch(
+            "scripts.run_train.os.getgid", return_value=456
+        ):
+            self.assertEqual(container_user_args(False), ["--user", "123:456"])
+        with patch(
+            "scripts.run_train.subprocess.check_output",
+            return_value='["name=seccomp,profile=builtin", "name=rootless"]',
+        ):
+            self.assertTrue(docker_is_rootless())
+
     def test_sage_defaults_and_exclusive_refill_control(self):
         cfg = self.config(remove_constant_reward_groups=True)
         self.assertTrue(cfg["sage_hint_resampling"])

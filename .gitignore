@@ -246,3 +246,4 @@ runs/
 # Generated local outputs
 /outputs/
 /checkpoints/
+/api-keys/

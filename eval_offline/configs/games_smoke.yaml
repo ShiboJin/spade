@@ -1,0 +1,17 @@
+# Fast integration coverage for every benchmark retained in games.yaml.
+# This is not a reportable score: it runs one episode/item per component.
+suites:
+  gem:
+    defaults:
+      episodes: 1
+      max_turns: 2
+      temperature: 0.6
+      max_tokens: 4096
+      max_concurrent: 8
+    tasks:
+      - { task_id: "mcq:GPQA-Diamond-official", episodes: 1, seed: 42, temperature: 0.7, max_tokens: 4096 }
+      - { task_id: "eval:LiveCodeBench-v6", episodes: 1, seed: 42, temperature: 0.7, max_tokens: 4096 }
+      - { task_id: "rg:chain_sum-hard", episodes: 1, max_turns: 2, temperature: 0.6, max_tokens: 4096 }
+      - { task_id: "rg:spell_backward-hard", episodes: 1, max_turns: 2, temperature: 0.6, max_tokens: 4096 }
+      - { task_id: "rg:needle_haystack-hard", episodes: 1, max_turns: 2, temperature: 0.6, max_tokens: 4096 }
+      - { task_id: "rg:knights_knaves-hard", episodes: 1, max_turns: 2, temperature: 0.6, max_tokens: 4096 }

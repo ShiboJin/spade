@@ -29,11 +29,13 @@ def _apply_routing_patch(acebench: Path) -> None:
     _patch_strip_reasoning(acebench)
 
     if not api_file.exists():
+        _patch_request_timeout(acebench)
         logger.warning("[acebench] apimodel_inference.py not found — skipping patch")
         return
 
     content = api_file.read_text()
     if _PATCH_MARKER in content:
+        _patch_request_timeout(acebench)
         logger.debug("[acebench] routing patch already applied")
         return
 
@@ -61,6 +63,7 @@ def _apply_routing_patch(acebench: Path) -> None:
         _patch_apimodel_inference(api_file)
         _patch_inference_map(map_file)
         logger.info("[acebench] routing patch applied via in-place edit")
+    _patch_request_timeout(acebench)
 
 
 def _patch_apimodel_inference(api_file: Path) -> None:
@@ -193,6 +196,28 @@ def _patch_disable_thinking(acebench: Path) -> None:
         if needle in content:
             content = content.replace(needle, inject)
             target.write_text(content)
+
+
+def _patch_request_timeout(acebench: Path) -> None:
+    """Apply the JSON request budget to ACEBench's local-model clients."""
+    targets = [
+        acebench / "model_inference" / "apimodel_inference.py",
+        acebench / "model_inference" / "multi_step" / "APIModel_agent.py",
+        acebench / "model_inference" / "multi_turn" / "APIModel_agent.py",
+    ]
+    needle = "OpenAI(base_url=base_url, api_key=api_key)"
+    replacement = (
+        "OpenAI(base_url=base_url, api_key=api_key, "
+        'timeout=float(os.getenv("SPADE_EVAL_REQUEST_TIMEOUT_SECONDS", "600")))'
+    )
+    for target in targets:
+        if not target.exists():
+            continue
+        content = target.read_text()
+        if "SPADE_EVAL_REQUEST_TIMEOUT_SECONDS" in content:
+            continue
+        if needle in content:
+            target.write_text(content.replace(needle, replacement, 1))
 
 
 def _patch_agent_routing(acebench: Path) -> None:

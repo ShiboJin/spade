@@ -7,12 +7,12 @@ ACEBench paper (arXiv 2509.13311 / AgentScaler).
 
 Prerequisites
 -------------
-Set the ``ACEBENCH_DIR`` environment variable to the root of a local clone
-of ACEBench (``git clone https://github.com/ACEBench/ACEBench``).  The suite
-skips silently when the variable is absent.
+The unified image includes ACEBench at ``/opt/benchmarks/ACEBench``. Set
+``ACEBENCH_DIR`` only to override that bundled checkout.
 
-Also set ``GPT_BASE_URL`` / ``GPT_AGENT_API_KEY`` (or ``OPENAI_API_KEY``) so
-that the ACEBench user-simulator (default: gpt-4o) can call the OpenAI API.
+Also set ``OPENROUTER_API_KEY`` (preferred) or ``OPENAI_API_KEY`` so that the
+ACEBench GPT-4o user-simulator can call its remote API. OpenRouter is routed
+through its OpenAI-compatible endpoint while the evaluated model stays local.
 
 Config example
 --------------
@@ -132,7 +132,11 @@ def _acebench_python() -> str:
     dependencies conflict with the serving environment. The current interpreter
     is used when the variable is unset.
     """
-    return os.environ.get("ACEBENCH_PYTHON") or sys.executable
+    configured = os.environ.get("ACEBENCH_PYTHON", "").strip()
+    bundled = Path("/opt/benchmarks/acebench-venv/bin/python")
+    if configured:
+        return configured
+    return str(bundled) if bundled.is_file() else sys.executable
 
 
 def _build_generate_cmd(cfg: dict, model: str) -> list[str]:
@@ -147,7 +151,9 @@ def _build_generate_cmd(cfg: dict, model: str) -> list[str]:
     max_tokens = cfg.get("max_tokens", 1200)
     num_threads = cfg.get("num_threads", 16)
     max_dialog_turns = cfg.get("max_dialog_turns", 40)
-    user_model = cfg.get("user_model", "gpt-4o")
+    user_model = os.environ.get("ACEBENCH_USER_MODEL") or cfg.get(
+        "user_model", "gpt-4o"
+    )
 
     return [
         _acebench_python(), "generate.py",
@@ -180,17 +186,20 @@ def _build_eval_cmd(cfg: dict, model: str) -> list[str]:
 
 
 def _parse_scores(score_dir: Path) -> dict[str, float]:
-    """Parse per-category score JSONs and return group scores as percentages.
+    """Parse per-category score JSONs and return scores as percentages.
 
     ``score_dir`` is ``<acebench_root>/score_all/score_<lang>/<model>``.
 
-    Returns ``{"normal": float, "special": float, "agent": float}`` where
-    each value is in percentage points (0–100).
+    Returns group averages plus any individual Agent leaves found. Values are
+    percentage points (0–100). In particular, Agent-only runs expose
+    ``agent_multi_step`` and ``agent_multi_turn`` separately rather than only
+    returning their combined ``agent`` average.
 
     Agent categories use ``end_to_end_accuracy``; all others use ``accuracy``.
     Values already in [0,1] are multiplied by 100.
     """
     group_values: dict[str, list[float]] = {"normal": [], "special": [], "agent": []}
+    agent_leaf_values: dict[str, float] = {}
 
     for json_file in sorted(score_dir.glob("data_*_score.json")):
         # Extract category from filename: data_<category>_score.json
@@ -226,6 +235,8 @@ def _parse_scores(score_dir: Path) -> dict[str, float]:
             acc *= 100.0
 
         group_values[group].append(acc)
+        if category in _AGENT_LEAVES:
+            agent_leaf_values[category] = acc
 
     result: dict[str, float] = {}
     for grp, vals in group_values.items():
@@ -235,14 +246,13 @@ def _parse_scores(score_dir: Path) -> dict[str, float]:
         else:
             result[grp] = sum(vals) / len(vals)
 
+    result.update(agent_leaf_values)
     return result
 
 
 def _acebench_dir() -> Path | None:
-    """Return the ACEBench root directory from ``ACEBENCH_DIR``, or None."""
-    val = os.environ.get("ACEBENCH_DIR", "").strip()
-    if not val:
-        return None
+    """Return the configured or image-bundled ACEBench root directory."""
+    val = os.environ.get("ACEBENCH_DIR", "/opt/benchmarks/ACEBench").strip()
     p = Path(val)
     if not p.is_dir():
         logger.warning("[acebench] ACEBENCH_DIR=%r is not a directory", val)
@@ -301,15 +311,22 @@ def run(client: Any, cfg: dict, out_dir: Path) -> dict[str, Any]:
     env["ACEBENCH_AGENT_BASE_URL"] = agent_base_url
     env["ACEBENCH_AGENT_API_KEY"] = "EMPTY"
     env["ACEBENCH_SERVED_MODEL"] = model
-    # The Agent user-simulator uses OpenAI while the evaluated model stays local.
+    # The Agent user-simulator is remote while the evaluated model stays local.
+    # OpenRouter exposes an OpenAI-compatible API, but requires provider/model
+    # slugs such as openai/gpt-4o-2024-08-06.
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
-    if openai_key:
-        env.setdefault("GPT_API_KEY", openai_key)
-        env.setdefault("GPT_AGENT_API_KEY", openai_key)
+    simulator_key = openrouter_key or openai_key
+    if simulator_key:
+        env.setdefault("GPT_API_KEY", simulator_key)
+        env.setdefault("GPT_AGENT_API_KEY", simulator_key)
+        if openrouter_key:
+            env.setdefault("GPT_BASE_URL", "https://openrouter.ai/api/v1")
     else:
         logger.warning(
-            "[acebench] OPENAI_API_KEY not set — the Agent category's gpt-4o "
-            "user-simulator cannot run; Agent scores will be unreliable."
+            "[acebench] neither OPENROUTER_API_KEY nor OPENAI_API_KEY is set — "
+            "the Agent category's GPT user-simulator cannot run; Agent scores "
+            "will be unreliable."
         )
 
     # --- generate step ---
@@ -362,12 +379,23 @@ def run(client: Any, cfg: dict, out_dir: Path) -> dict[str, Any]:
     agent = groups.get("agent", 0.0)
     overall = _overall(normal, special, agent)
 
-    metrics: dict[str, Any] = {
-        f"acebench/{lang}/normal": round(normal / 100.0, 5),
-        f"acebench/{lang}/special": round(special / 100.0, 5),
-        f"acebench/{lang}/agent": round(agent / 100.0, 5),
-        f"acebench/{lang}/overall": round(overall / 100.0, 5),
-    }
+    if cfg.get("category") == "agent":
+        metrics = {
+            f"acebench/{lang}/agent_multi_step": round(
+                groups.get("agent_multi_step", 0.0) / 100.0, 5
+            ),
+            f"acebench/{lang}/agent_multi_turn": round(
+                groups.get("agent_multi_turn", 0.0) / 100.0, 5
+            ),
+            f"acebench/{lang}/agent": round(agent / 100.0, 5),
+        }
+    else:
+        metrics = {
+            f"acebench/{lang}/normal": round(normal / 100.0, 5),
+            f"acebench/{lang}/special": round(special / 100.0, 5),
+            f"acebench/{lang}/agent": round(agent / 100.0, 5),
+            f"acebench/{lang}/overall": round(overall / 100.0, 5),
+        }
 
     # --- copy raw outputs ---
     raw_out = out_dir / "acebench_raw"
