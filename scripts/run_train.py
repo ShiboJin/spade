@@ -43,7 +43,9 @@ FIELDS = {
 SELECTION_DEFAULTS = {"author": None}
 MEMORY_DEFAULTS = {"memory_limit_gib": 160, "host_memory_reserve_gib": DEFAULT_RESERVE_GIB}
 ROLLOUT_DEFAULTS = {
-    "sage_hint_resampling": True,
+    # Keep rollout collection single-pass by default. Author-hint resampling
+    # remains available as an explicit opt-in for experiments that need it.
+    "sage_hint_resampling": False,
     "vllm_enforce_eager": True,
     "sleep_level": 2,
     "offload_model": True,

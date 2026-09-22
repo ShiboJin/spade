@@ -46,8 +46,9 @@ temperature (`--rollout-temperature 1.0`) match across both.
 
 ### EnvDuels author-hint GRPO
 
-`scripts/run_train.py` enables `training.sage_hint_resampling` by default. Set it
-explicitly to `false` to reproduce the original no-hint training protocol.
+`scripts/run_train.py` keeps `training.sage_hint_resampling` disabled by default,
+so each group receives only its initial rollout. Set it explicitly to `true` to
+enable the optional author-hint retry described below.
 
 The fixed pool need not divide evenly by `num_games_per_rollout`. Swift/TRL's
 sampler drops the incomplete final generation batch after shuffling each pass;

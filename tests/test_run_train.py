@@ -24,22 +24,22 @@ class TrainingLauncherTests(unittest.TestCase):
         ):
             self.assertTrue(docker_is_rootless())
 
-    def test_sage_defaults_and_exclusive_refill_control(self):
+    def test_hint_resampling_is_opt_in_and_controls_refill(self):
         cfg = self.config(remove_constant_reward_groups=True)
-        self.assertTrue(cfg["sage_hint_resampling"])
-        command, _ = docker_command(cfg, ROOT / "outputs/training/test-sage", "test-sage")
-        self.assertIn("SPADE_SAGE_HINT_RESAMPLING=true", command)
-        self.assertIn("SPADE_MAX_ROLLOUT_ATTEMPTS=1", command)
-        self.assertFalse(any("SPADE_MIN_VALID_GROUPS" in x for x in command))
-        self.assertIn("DYNAMIC_SAMPLE=false", command)
-        cfg = self.config(sage_hint_resampling=False, remove_constant_reward_groups=True)
+        self.assertFalse(cfg["sage_hint_resampling"])
         command, _ = docker_command(cfg, ROOT / "outputs/training/test-plain", "test-plain")
         self.assertIn("SPADE_SAGE_HINT_RESAMPLING=false", command)
+        self.assertIn("SPADE_MAX_ROLLOUT_ATTEMPTS=1", command)
+        self.assertFalse(any("SPADE_MIN_VALID_GROUPS" in x for x in command))
         self.assertIn("DYNAMIC_SAMPLE=true", command)
+        cfg = self.config(sage_hint_resampling=True, remove_constant_reward_groups=True)
+        command, _ = docker_command(cfg, ROOT / "outputs/training/test-sage", "test-sage")
+        self.assertIn("SPADE_SAGE_HINT_RESAMPLING=true", command)
+        self.assertIn("DYNAMIC_SAMPLE=false", command)
 
     def test_sage_disallows_environment_refill(self):
         with self.assertRaisesRegex(ValueError, "max_rollout_attempts=1"):
-            self.config(max_rollout_attempts=2)
+            self.config(sage_hint_resampling=True, max_rollout_attempts=2)
 
     def test_legacy_minimum_does_not_gate_updates(self):
         cfg = self.config(min_valid_groups=99)
@@ -49,7 +49,7 @@ class TrainingLauncherTests(unittest.TestCase):
 
     def test_sage_rejects_multiple_substeps(self):
         with self.assertRaisesRegex(ValueError, "num_substeps=1"):
-            self.config(num_substeps=2)
+            self.config(sage_hint_resampling=True, num_substeps=2)
         self.config(num_substeps=2, sage_hint_resampling=False)
 
     def test_disjoint_training_and_evaluation_use_shared_gpu_reservations(self):
