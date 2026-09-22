@@ -172,6 +172,98 @@ def install_chunked_grpo_logps(*, chunk_size=128):
     get_logger().info("Enabled Qwen GRPO projection/log-softmax in %s-token chunks", chunk_size)
 
 
+def single_iteration_fastpath_eligible(trainer, samples):
+    """Return whether the old-policy forward is redundant for this rollout.
+
+    With one on-policy GRPO iteration, the loss can use the differentiable
+    current log-probabilities and their detached value as the old policy.  Keep
+    the guard deliberately narrower than the mathematical minimum: features
+    that consume old-policy values for diagnostics, correction, distillation,
+    or a second update must continue through Swift's original scoring path.
+    """
+    if not getattr(getattr(trainer, "model", None), "training", False):
+        return False
+    checks = (
+        getattr(trainer, "num_iterations", None) == 1,
+        getattr(trainer, "beta", None) == 0.0,
+        getattr(trainer, "loss_type", None) == "grpo",
+        getattr(trainer, "importance_sampling_level", None) == "token",
+        not getattr(trainer, "compute_entropy", False),
+        not getattr(trainer, "kl_in_reward", False),
+        not getattr(trainer, "async_generate", False),
+        getattr(trainer, "rollout_importance_sampling_mode", None) is None,
+        not getattr(trainer, "log_rollout_offpolicy_metrics", False),
+        getattr(trainer, "off_policy_sequence_mask_delta", None) is None,
+        getattr(trainer, "chord_sft_iterator", None) is None,
+        not getattr(trainer, "use_liger_loss", False),
+        getattr(trainer, "sdar_loss_coef", 0.0) == 0.0,
+        getattr(trainer, "advantage_reweight", None) in (None, "none"),
+    )
+    if not all(checks):
+        return False
+
+    # Swift exposes dynamic self-distillation capability even when no teacher
+    # is active.  Reject actual teacher configuration or per-sample inputs, not
+    # that capability flag.
+    explicit_teacher = getattr(trainer, "_has_teacher_explicit", None)
+    if callable(explicit_teacher) and explicit_teacher():
+        return False
+    if any(getattr(trainer, name, None) is not None
+           for name in ("_teacher_model", "teacher_model_server")):
+        return False
+    if (getattr(trainer, "_teacher_use_disable_adapter", False)
+            or getattr(trainer, "use_teacher_api", False)):
+        return False
+    for sample in samples:
+        if bool(getattr(sample, "teacher_prompt", None)):
+            return False
+        if any(getattr(sample, name, None) is not None
+               for name in ("teacher_images", "teacher_messages")):
+            return False
+
+    # This captures Swift's reuse rule for num_iterations and mismatched
+    # rollout/gradient-accumulation windows.  Older compatible Swift versions
+    # may not expose the helper, in which case the explicit checks above apply.
+    old_policy = getattr(trainer, "old_policy", None)
+    return not (callable(old_policy) and old_policy())
+
+
+def install_single_iteration_fastpath(trainer_class=GRPOTrainer):
+    """Skip Swift's no-grad old-policy scoring when current.detach is exact."""
+    original_prepare = trainer_class._prepare_batch_inputs
+    original_logps = trainer_class._get_per_token_logps_and_entropies
+    if getattr(original_prepare, "_spade_single_iteration_fastpath", False):
+        return
+
+    @wraps(original_logps)
+    def get_logps(self, model, model_inputs, grpo_batch, *args, **kwargs):
+        if getattr(self, "_spade_skip_old_policy_active", False) and not torch.is_grad_enabled():
+            grpo_batch._spade_old_policy_fastpath = True
+            return None, None
+        return original_logps(self, model, model_inputs, grpo_batch, *args, **kwargs)
+
+    @wraps(original_prepare)
+    def prepare(self, samples, *args, **kwargs):
+        enabled = single_iteration_fastpath_eligible(self, samples)
+        previous = getattr(self, "_spade_skip_old_policy_active", False)
+        self._spade_skip_old_policy_active = enabled
+        try:
+            result = original_prepare(self, samples, *args, **kwargs)
+        finally:
+            self._spade_skip_old_policy_active = previous
+        if enabled and not getattr(self, "_spade_skip_old_policy_logged", False):
+            get_logger().info(
+                "Skipped redundant old-policy forward for single-iteration on-policy GRPO")
+            self._spade_skip_old_policy_logged = True
+        return result
+
+    get_logps._spade_single_iteration_fastpath = True
+    prepare._spade_single_iteration_fastpath = True
+    trainer_class._get_per_token_logps_and_entropies = get_logps
+    trainer_class._prepare_batch_inputs = prepare
+    get_logger().info("Enabled guarded single-iteration GRPO old-policy fast path")
+
+
 def synchronize_qwen_fsdp(model, accelerator):
     """Finish asynchronous FSDP work before the next accumulated forward."""
     if not torch.cuda.is_available() or getattr(accelerator.state, "fsdp_plugin", None) is None:
@@ -217,6 +309,8 @@ def install_from_environment():
         raise ValueError("CPU activation offload requires SPADE_GRPO_DECODER_CHECKPOINTING=true")
     if _enabled("SPADE_GRPO_CHUNKED_LOGPS"):
         install_chunked_grpo_logps(chunk_size=int(os.environ.get("SPADE_GRPO_LOGPS_CHUNK_SIZE", "128")))
+    if _enabled("SPADE_GRPO_SKIP_OLD_POLICY"):
+        install_single_iteration_fastpath()
     if decoder_checkpointing:
         install_decoder_checkpointing(offload_inputs=offload_inputs)
     if _enabled("SPADE_GRPO_CHECKPOINT_DELTA_RULE"):

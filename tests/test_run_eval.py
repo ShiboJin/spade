@@ -246,13 +246,17 @@ class EvaluationTests(unittest.TestCase):
     def test_context_changes_split_server_groups(self):
         cfg = load_config(ROOT / "configs/qwen38_all_evals.json")
         self.assertEqual(
+            [entry["max_tokens"] for entry in cfg["evaluations"]],
+            [16384, 16384, 16384, 16384],
+        )
+        self.assertEqual(
             [entry["context_length"] for entry in cfg["evaluations"]],
-            [40960, 40960, 32768],
+            [40960, 40960, 32768, 32768],
         )
         groups = _server_groups(cfg["evaluations"])
         self.assertEqual(
             [[entry["name"] for _, entry in group] for group in groups],
-            [["aime25", "aime26"], ["gem"]],
+            [["aime25", "aime26"], ["gem", "acebench"]],
         )
 
     def test_dry_run_never_starts_docker_or_creates_output(self):

@@ -54,6 +54,7 @@ Sleep level 1 still allows vLLM to offload its weights while sleeping; disabling
 | `grpo_decoder_checkpointing` | `true` | `false` | `SPADE_GRPO_DECODER_CHECKPOINTING` |
 | `grpo_cpu_activation_offload` | `true` | `false` | `SPADE_GRPO_CPU_ACTIVATION_OFFLOAD` |
 | `grpo_checkpoint_delta_rule` | `true` | `false` | `SPADE_GRPO_CHECKPOINT_DELTA_RULE` |
+| `grpo_skip_old_policy` | `true` | `true` | `SPADE_GRPO_SKIP_OLD_POLICY` |
 | `vllm_enforce_eager` | `true` | `false` | `VLLM_ENFORCE_EAGER` |
 | `sleep_level` | `2` | `1` | `SLEEP_LEVEL` |
 | `offload_model` | `true` | `false` | `OFFLOAD_MODEL` |
@@ -67,6 +68,10 @@ The launcher validates and passes them into Docker. `sleep_level` accepts intege
 CPU activation offload requires decoder checkpointing. Gated-delta recomputation
 only wraps the Transformers PyTorch fallback, not an installed native FLA kernel.
 GPU capacity alone does not change which attention implementation is installed.
+The old-policy fast path activates only for a single, on-policy GRPO iteration
+with zero KL, no teacher/distillation, no entropy selection, and no rollout or
+off-policy correction. Unsupported combinations retain Swift's original
+old-policy scoring automatically.
 
 The plugins use the Qwen3.5, Accelerate and ms-swift interfaces in the pinned
 unified image. Recheck compatibility before changing those runtime versions.

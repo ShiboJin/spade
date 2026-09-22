@@ -113,6 +113,47 @@ class LogpsDiagnosticsTests(unittest.TestCase):
             self.assertEqual([r["input_matches_old"] for r in records], [True, False])
             self.assertEqual(records[0]["ratio_max"], 1)
 
+    def test_single_iteration_fastpath_uses_current_detached_for_diagnostics(self):
+        class Trainer:
+            def _get_per_token_logps_and_entropies(self, model, inputs, batch):
+                if not torch.is_grad_enabled():
+                    return None, None
+                return model(inputs["input_ids"].float()).log_softmax(-1), None
+
+        install_logps_diagnostics(Trainer)
+        with TemporaryDirectory() as directory:
+            trainer = Trainer()
+            trainer.model = torch.nn.Linear(2, 2)
+            trainer.state = SimpleNamespace(global_step=0)
+            trainer.args = SimpleNamespace(output_dir=directory)
+            trainer.accelerator = SimpleNamespace(process_index=0)
+            trainer.overlong_filter = False
+            trainer.epsilon_low, trainer.epsilon_high = .2, .28
+            trainer.beta = 0.
+            trainer.importance_sampling_level = "token"
+            trainer.rollout_importance_sampling_mode = None
+            trainer.temperature = .8
+            batch = SimpleNamespace(
+                old_per_token_logps=None,
+                completion_mask=torch.ones(1, 2, dtype=torch.bool),
+                advantages=torch.tensor([[.75, .75]]),
+                logits_to_keep=2,
+                _spade_old_policy_fastpath=True,
+            )
+            inputs = {"input_ids": torch.tensor([[1, 2]])}
+            with torch.no_grad():
+                old, _ = trainer._get_per_token_logps_and_entropies(trainer.model, inputs, batch)
+            self.assertIsNone(old)
+            current, _ = trainer._get_per_token_logps_and_entropies(trainer.model, inputs, batch)
+            current.sum().backward()
+            record = json.loads(
+                (Path(directory) / "logps_diagnostics.rank0.jsonl").read_text().strip())
+            self.assertEqual(record["old_policy_source"], "current_detached")
+            self.assertTrue(record["input_matches_old"])
+            self.assertEqual(record["ratio_min"], 1)
+            self.assertEqual(record["ratio_max"], 1)
+            self.assertTrue(torch.isfinite(trainer.model.weight.grad).all())
+
 
 if __name__ == "__main__":
     unittest.main()

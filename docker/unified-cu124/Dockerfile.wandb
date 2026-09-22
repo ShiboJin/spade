@@ -6,7 +6,21 @@ FROM ${BASE_IMAGE}
 
 ARG WANDB_VERSION=0.29.0
 ARG QWEN_VL_UTILS_VERSION=0.0.14
-RUN python3 -m pip install --no-cache-dir \
+ARG FLA_VERSION=0.5.2
+ARG CAUSAL_CONV1D_VERSION=1.7.0
+ARG BUILD_JOBS=16
+
+# Qwen3.5 uses gated-delta linear attention in most layers.  Install the CUDA
+# kernels only in this thin layer so the tested Torch/vLLM base image remains
+# unchanged and kernel version changes never rebuild it.
+RUN MAX_JOBS="${BUILD_JOBS}" CMAKE_BUILD_PARALLEL_LEVEL="${BUILD_JOBS}" \
+    python3 -m pip install --no-build-isolation \
+      "causal-conv1d==${CAUSAL_CONV1D_VERSION}" \
+      "flash-linear-attention[cuda]==${FLA_VERSION}" && \
+    python3 -m pip install --no-cache-dir \
       "wandb==${WANDB_VERSION}" \
       "qwen-vl-utils[decord]==${QWEN_VL_UTILS_VERSION}" && \
-    python3 -c 'import av, decord, qwen_vl_utils, wandb; print("wandb", wandb.__version__)'
+    python3 -c 'import av, causal_conv1d, decord, fla, qwen_vl_utils, torch, triton, wandb; assert torch.__version__.split("+")[0] == "2.11.0"; assert torch.version.cuda == "12.4"; print("FLA", fla.__version__, "causal-conv1d", causal_conv1d.__version__, "Triton", triton.__version__, "wandb", wandb.__version__)'
+
+LABEL org.envduels.fla.version="${FLA_VERSION}" \
+      org.envduels.causal-conv1d.version="${CAUSAL_CONV1D_VERSION}"

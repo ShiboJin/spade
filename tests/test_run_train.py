@@ -117,6 +117,7 @@ class TrainingLauncherTests(unittest.TestCase):
         self.assertIn("SPADE_GRPO_DECODER_CHECKPOINTING=true", command)
         self.assertIn("SPADE_GRPO_CPU_ACTIVATION_OFFLOAD=true", command)
         self.assertIn("SPADE_GRPO_CHECKPOINT_DELTA_RULE=true", command)
+        self.assertIn("SPADE_GRPO_SKIP_OLD_POLICY=true", command)
         self.assertIn("SCALE_REWARDS=none", command)
         self.assertIn("PPO_CLIP_LOW=0.2", command)
         self.assertIn("PPO_CLIP_HIGH=0.28", command)
@@ -234,6 +235,7 @@ class TrainingLauncherTests(unittest.TestCase):
             {"max_context_length": 8192, "actor_max_tokens": 8192},
             {"grpo_logps_chunk_size": 0},
             {"grpo_chunked_logps": "true"},
+            {"grpo_skip_old_policy": "true"},
             {"grpo_decoder_checkpointing": False, "grpo_cpu_activation_offload": True},
             {"learning_rate": float("nan")},
             {"max_steps": True},

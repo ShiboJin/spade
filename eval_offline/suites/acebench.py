@@ -260,6 +260,22 @@ def _acebench_dir() -> Path | None:
     return p
 
 
+def _enable_leaf_category(acebench: Path, category: str) -> None:
+    """Teach upstream generate.py to accept a single leaf category.
+
+    eval_main.py already falls back to leaf names, while generate.py indexes
+    ACE_DATA_CATEGORY directly. The runtime checkout is an isolated copy, so
+    adding this idempotent mapping is safe for split evaluations.
+    """
+    if category not in _CATEGORY_TO_GROUP:
+        return
+    category_file = acebench / "category.py"
+    marker = f'ACE_DATA_CATEGORY.setdefault("{category}", ["{category}"])'
+    source = category_file.read_text(encoding="utf-8")
+    if marker not in source:
+        category_file.write_text(source + "\n" + marker + "\n", encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # run() — the suite entry point
 # ---------------------------------------------------------------------------
@@ -290,6 +306,7 @@ def run(client: Any, cfg: dict, out_dir: Path) -> dict[str, Any]:
 
     # Apply routing patch (idempotent)
     _apply_routing_patch(acebench)
+    _enable_leaf_category(acebench, cfg.get("category", "test_all"))
 
     # Thinking mode relies on the server's reasoning parser to keep answers strict.
     if not cfg.get("enable_thinking", True):
@@ -379,16 +396,12 @@ def run(client: Any, cfg: dict, out_dir: Path) -> dict[str, Any]:
     agent = groups.get("agent", 0.0)
     overall = _overall(normal, special, agent)
 
-    if cfg.get("category") == "agent":
+    if cfg.get("category") == "agent" or cfg.get("category") in _AGENT_LEAVES:
         metrics = {
-            f"acebench/{lang}/agent_multi_step": round(
-                groups.get("agent_multi_step", 0.0) / 100.0, 5
-            ),
-            f"acebench/{lang}/agent_multi_turn": round(
-                groups.get("agent_multi_turn", 0.0) / 100.0, 5
-            ),
-            f"acebench/{lang}/agent": round(agent / 100.0, 5),
+            f"acebench/{lang}/{leaf}": round(groups[leaf] / 100.0, 5)
+            for leaf in _AGENT_LEAVES if leaf in groups
         }
+        metrics[f"acebench/{lang}/agent"] = round(agent / 100.0, 5)
     else:
         metrics = {
             f"acebench/{lang}/normal": round(normal / 100.0, 5),

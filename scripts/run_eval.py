@@ -99,7 +99,7 @@ JSONL_KEYS = {
 }
 SUITE_KEYS = {
     "config", "suites", "max_concurrent", "request_timeout_seconds",
-    "context_length",
+    "context_length", "max_tokens",
 }
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -246,12 +246,19 @@ def _normalise_evaluations(
                 "max_concurrent": cfg["max_concurrent"],
                 "request_timeout_seconds": cfg["request_timeout_seconds"],
                 "context_length": cfg["context_length"],
+                "max_tokens": cfg["max_tokens"],
                 **item,
             }
             _nonempty_string(entry, "config")
             _positive_int(entry, "max_concurrent")
             _positive_int(entry, "request_timeout_seconds")
             _positive_int(entry, "context_length")
+            _positive_int(entry, "max_tokens")
+            if entry["max_tokens"] >= entry["context_length"]:
+                raise ValueError(
+                    f"Suite evaluation {name!r}: context_length must leave room "
+                    "for the prompt beyond max_tokens"
+                )
             suites = entry.get("suites")
             if not isinstance(suites, list) or not suites or any(
                 not isinstance(value, str) or not value.strip() for value in suites
@@ -644,6 +651,10 @@ def _evaluate_suite(cfg: dict, entry: dict, out: Path, base_url: str) -> dict:
         suite_config = deepcopy(available[suite])
         if isinstance(suite_config, dict):
             suite_config["concurrent"] = False
+            # A single top-level cap applies to every evaluation type.  GEM
+            # expands this override to every task after loading its task file;
+            # ACEBench consumes it directly.
+            suite_config["max_tokens"] = entry["max_tokens"]
         ordered_suites[suite] = suite_config
     combined_path = out / "selected_suites.yaml"
     combined_path.write_text(
@@ -753,11 +764,13 @@ def evaluate(cfg: dict, out: Path) -> None:
                         "status": "running", "current_index": index,
                         "current_evaluation": name,
                         "context_length": entry["context_length"],
+                        "max_tokens": entry["max_tokens"],
                         "completed": [item["name"] for item in sequence],
                     })
                     print(
                         f"[{index}/{len(cfg['evaluations'])}] Starting {name} "
-                        f"({entry['type']})", flush=True,
+                        f"({entry['type']}, max_tokens={entry['max_tokens']})",
+                        flush=True,
                     )
                     step_started = time.time()
                     if entry["type"] == "jsonl":
@@ -768,6 +781,7 @@ def evaluate(cfg: dict, out: Path) -> None:
                     sequence.append({
                         "name": name, "type": entry["type"],
                         "context_length": entry["context_length"],
+                        "max_tokens": entry["max_tokens"],
                         "elapsed_sec": elapsed, "output_dir": str(step_out),
                         "result": result,
                     })
@@ -967,6 +981,7 @@ def _validate_host_inputs(cfg: dict) -> list[dict]:
             plan.append({
                 "name": entry["name"], "type": "jsonl",
                 "context_length": entry["context_length"],
+                "max_tokens": entry["max_tokens"],
                 "n_problems": len(rows), "dataset_total_problems": total,
                 "n_completions": len(rows) * entry["samples_per_problem"],
                 "data_sha256": digest, "selected_ids": [row["id"] for row in rows],
@@ -979,6 +994,7 @@ def _validate_host_inputs(cfg: dict) -> list[dict]:
             plan.append({
                 "name": entry["name"], "type": "suite",
                 "context_length": entry["context_length"],
+                "max_tokens": entry["max_tokens"],
                 "suites": entry["suites"], "config": entry["config"],
             })
     return plan

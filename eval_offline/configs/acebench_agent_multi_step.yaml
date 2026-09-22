@@ -1,0 +1,11 @@
+suites:
+  acebench:
+    language: en
+    category: agent_multi_step
+    enable_thinking: true
+    temperature: 0.7
+    top_p: 1.0
+    max_tokens: 16384
+    num_threads: 16
+    max_dialog_turns: 40
+    user_model: openai/gpt-4o-2024-08-06

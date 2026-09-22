@@ -7,6 +7,7 @@ import unittest
 import yaml
 
 from eval_offline.suites._acebench_patches import _patch_request_timeout
+from eval_offline.suites.acebench import _enable_leaf_category
 from scripts.run_benchmark_eval import (
     ROOT, checkpoint_mount, docker_command, load_config,
 )
@@ -86,6 +87,18 @@ class BenchmarkEvaluationTests(unittest.TestCase):
                 self.assertEqual(
                     patched.count("SPADE_EVAL_REQUEST_TIMEOUT_SECONDS"), 1
                 )
+
+    def test_acebench_leaf_category_patch_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            category = root / "category.py"
+            category.write_text("ACE_DATA_CATEGORY = {}\n")
+            _enable_leaf_category(root, "agent_multi_step")
+            _enable_leaf_category(root, "agent_multi_step")
+            self.assertEqual(
+                category.read_text().count('ACE_DATA_CATEGORY.setdefault("agent_multi_step"'),
+                1,
+            )
 
 
 if __name__ == "__main__":

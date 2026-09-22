@@ -1,0 +1,6 @@
+# LiveCodeBench-v6 only; GPQA and Reasoning Gym are assigned to the other run.
+suites:
+  gem:
+    config_path: eval_offline/configs/games.yaml
+    include_task_prefixes:
+      - "eval:"

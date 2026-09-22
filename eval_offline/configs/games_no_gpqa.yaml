@@ -1,0 +1,8 @@
+# AIME is run by scripts/run_eval.py. This GEM selection retains the full
+# Reasoning-Gym hard split and LiveCodeBench-v6 protocol from games.yaml while
+# intentionally omitting gated GPQA-Diamond.
+suites:
+  gem:
+    config_path: eval_offline/configs/games.yaml
+    exclude_tasks:
+      - mcq:GPQA-Diamond-official

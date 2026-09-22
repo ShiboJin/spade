@@ -56,6 +56,7 @@ GRPO_MEMORY_DEFAULTS = {
     "grpo_decoder_checkpointing": True,
     "grpo_cpu_activation_offload": True,
     "grpo_checkpoint_delta_rule": True,
+    "grpo_skip_old_policy": True,
 }
 
 
@@ -153,7 +154,7 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
     for key in ("sage_hint_resampling", "dataset_shuffle", "remove_constant_reward_groups", "enable_thinking",
                 "preserve_thinking", "overlong_filter", "rollout_json_export",
                 "wandb_enabled", "grpo_chunked_logps", "grpo_decoder_checkpointing",
-                "grpo_cpu_activation_offload", "grpo_checkpoint_delta_rule",
+                "grpo_cpu_activation_offload", "grpo_checkpoint_delta_rule", "grpo_skip_old_policy",
                 "vllm_enforce_eager", "offload_model", "offload_optimizer"):
         if type(cfg[key]) is not bool:
             raise ValueError(f"{key} must be a boolean")
@@ -415,6 +416,7 @@ def docker_command(
         "SPADE_GRPO_DECODER_CHECKPOINTING": str(cfg["grpo_decoder_checkpointing"]).lower(),
         "SPADE_GRPO_CPU_ACTIVATION_OFFLOAD": str(cfg["grpo_cpu_activation_offload"]).lower(),
         "SPADE_GRPO_CHECKPOINT_DELTA_RULE": str(cfg["grpo_checkpoint_delta_rule"]).lower(),
+        "SPADE_GRPO_SKIP_OLD_POLICY": str(cfg["grpo_skip_old_policy"]).lower(),
         "MAX_TURNS": cfg["max_turns"],
         "MAX_LENGTH": cfg["max_context_length"],
         "MAX_COMPLETION_LENGTH": cfg["actor_max_tokens"],

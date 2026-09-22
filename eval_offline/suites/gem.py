@@ -191,6 +191,45 @@ def run(client, cfg: dict, out_dir: Path) -> dict[str, Any]:
                 config_path = Path(tf.name)
     defaults, task_specs = load_gem_eval_config(str(config_path))
 
+    max_tokens = cfg.get("max_tokens")
+    if max_tokens is not None:
+        if type(max_tokens) is not int or max_tokens < 1:
+            raise ValueError("gem max_tokens must be a positive integer")
+        task_specs = [replace(spec, max_tokens=max_tokens) for spec in task_specs]
+        logger.info("[gem] overriding every task max_tokens=%d", max_tokens)
+
+    prefixes = cfg.get("include_task_prefixes", [])
+    if not isinstance(prefixes, list) or any(
+        not isinstance(prefix, str) or not prefix for prefix in prefixes
+    ):
+        raise ValueError("gem include_task_prefixes must be a list of nonempty strings")
+    if prefixes:
+        task_specs = [
+            spec for spec in task_specs
+            if any(spec.task_id.startswith(prefix) for prefix in prefixes)
+        ]
+        logger.info("[gem] selected task prefixes: %s", ", ".join(prefixes))
+
+    excluded = cfg.get("exclude_tasks", [])
+    if not isinstance(excluded, list) or any(
+        not isinstance(task_id, str) or not task_id.strip()
+        for task_id in excluded
+    ):
+        raise ValueError("gem exclude_tasks must be a list of nonempty task IDs")
+    if len(set(excluded)) != len(excluded):
+        raise ValueError("gem exclude_tasks must not contain duplicates")
+    if excluded:
+        available_ids = {spec.task_id for spec in task_specs}
+        unknown = sorted(set(excluded) - available_ids)
+        if unknown:
+            raise ValueError(f"gem exclude_tasks contains unknown task IDs: {unknown}")
+        excluded_ids = set(excluded)
+        task_specs = [spec for spec in task_specs if spec.task_id not in excluded_ids]
+        logger.info(
+            "[gem] excluded %d configured task(s): %s",
+            len(excluded_ids), ", ".join(excluded),
+        )
+
     if not task_specs:
         logger.warning("[gem] no tasks in config — nothing to run")
         return {"gem_n_tasks": 0}

@@ -1,0 +1,6 @@
+# The complete 100-task Reasoning-Gym hard split only.
+suites:
+  gem:
+    config_path: eval_offline/configs/games.yaml
+    include_task_prefixes:
+      - "rg:"

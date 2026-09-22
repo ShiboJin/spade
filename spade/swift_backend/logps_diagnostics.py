@@ -85,8 +85,9 @@ def install_logps_diagnostics(trainer_class):
             return result
         import torch
         old = grpo_batch.old_per_token_logps
+        fastpath = bool(getattr(grpo_batch, "_spade_old_policy_fastpath", False))
         # Old scoring happens before postprocessing, with no gradients.
-        if old is None:
+        if old is None and not torch.is_grad_enabled():
             grpo_batch._spade_old_input_hash = input_fingerprint(model_inputs)
             # Opt-in debugging only: retain exact encoded inputs, not a lossy
             # re-tokenization of logged prompt/completion strings.
@@ -103,16 +104,24 @@ def install_logps_diagnostics(trainer_class):
                                 temperature=self.temperature), path)
                 grpo_batch._spade_logps_snapshot_path = str(path)
         elif torch.is_grad_enabled():
+            # The guarded single-iteration path deliberately has no separate
+            # old-policy tensor.  Swift's loss uses this exact detached value,
+            # so diagnostics should report the same ratio without triggering
+            # another model forward.
+            effective_old = result[0].detach() if old is None and fastpath else old
+            if effective_old is None:
+                return result
             mask = grpo_batch.completion_mask.clone()
             if self.overlong_filter and grpo_batch.truncated_mask is not None:
                 mask &= ~grpo_batch.truncated_mask[:, None]
-            record = summarize_logps(result[0], old, grpo_batch.advantages, mask,
+            record = summarize_logps(result[0], effective_old, grpo_batch.advantages, mask,
                                      epsilon_low=self.epsilon_low, epsilon_high=self.epsilon_high)
             old_hash = getattr(grpo_batch, "_spade_old_input_hash", None)
             record.update(global_step=self.state.global_step, rollout_step=getattr(self, "_step", None),
                           rank=self.accelerator.process_index, beta=self.beta,
                           importance_sampling_level=self.importance_sampling_level,
                           rollout_importance_sampling_mode=self.rollout_importance_sampling_mode,
+                          old_policy_source="current_detached" if old is None else "precomputed",
                           input_matches_old=(old_hash == input_fingerprint(model_inputs)) if old_hash else None,
                           input_snapshot=getattr(grpo_batch, "_spade_logps_snapshot_path", None),
                           samples=getattr(grpo_batch, "_spade_diagnostic_samples", []))
