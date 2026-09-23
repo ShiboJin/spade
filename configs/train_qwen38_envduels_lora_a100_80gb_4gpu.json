@@ -23,6 +23,7 @@
     "per_device_train_batch_size": 1,
     "num_substeps": 1,
     "dataset_shuffle": true,
+    "rollout_with_hint": false,
     "sage_hint_resampling": false,
     "remove_constant_reward_groups": false,
     "max_rollout_attempts": 1,

@@ -43,6 +43,7 @@ FIELDS = {
 SELECTION_DEFAULTS = {"author": None}
 MEMORY_DEFAULTS = {"memory_limit_gib": 160, "host_memory_reserve_gib": DEFAULT_RESERVE_GIB}
 ROLLOUT_DEFAULTS = {
+    "rollout_with_hint": False,
     # Keep rollout collection single-pass by default. Author-hint resampling
     # remains available as an explicit opt-in for experiments that need it.
     "sage_hint_resampling": False,
@@ -153,7 +154,7 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
         raise ValueError("max_steps must be null or a positive integer")
     if type(cfg["fixed_pool_seed"]) is not int or not 0 <= cfg["fixed_pool_seed"] < 2**63:
         raise ValueError("fixed_pool_seed must be an integer in [0, 2**63)")
-    for key in ("sage_hint_resampling", "dataset_shuffle", "remove_constant_reward_groups", "enable_thinking",
+    for key in ("rollout_with_hint", "sage_hint_resampling", "dataset_shuffle", "remove_constant_reward_groups", "enable_thinking",
                 "preserve_thinking", "overlong_filter", "rollout_json_export",
                 "wandb_enabled", "grpo_chunked_logps", "grpo_decoder_checkpointing",
                 "grpo_cpu_activation_offload", "grpo_checkpoint_delta_rule", "grpo_skip_old_policy",
@@ -162,6 +163,8 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
             raise ValueError(f"{key} must be a boolean")
     if cfg["sage_hint_resampling"] and cfg["num_substeps"] != 1:
         raise ValueError("sage_hint_resampling requires num_substeps=1 for one-pass SAGE rollouts")
+    if cfg["rollout_with_hint"] and cfg["sage_hint_resampling"]:
+        raise ValueError("rollout_with_hint cannot be combined with sage_hint_resampling")
     if cfg["sage_hint_resampling"] and cfg["max_rollout_attempts"] != 1:
         raise ValueError("sage_hint_resampling requires max_rollout_attempts=1 (no environment refill)")
     if type(cfg["sleep_level"]) is not int or cfg["sleep_level"] not in (0, 1, 2):
@@ -249,11 +252,11 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
                 f"available authors: {available}"
             )
     selected_manifest_ids = {row["id"] for row in selected_manifest_rows}
-    if cfg["sage_hint_resampling"]:
+    if cfg["sage_hint_resampling"] or cfg["rollout_with_hint"]:
         from spade.core.envduels_hints import load_hint_levels
         for row in selected_manifest_rows:
             if not load_hint_levels(cfg["export_dir"], row):
-                raise ValueError(f"SAGE training requires an author hint: {row['id']}")
+                raise ValueError(f"Hinted training requires an author hint: {row['id']}")
     accelerate = document["accelerate"]
     if accelerate.get("distributed_type") != "FSDP":
         raise ValueError("Accelerate config must use FSDP")
@@ -281,6 +284,8 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
                 raise ValueError(f"Invalid training row {number}: {exc}") from exc
             if env.get("name") != "envduels" or env.get("export_dir") != str(CONTAINER_EXPORT):
                 raise ValueError(f"Training row {number} has an incompatible EnvDuels config")
+            if type(env.get("hint_level", 0)) is not int or env.get("hint_level", 0) != 0:
+                raise ValueError(f"Training row {number} must start without a hint; use rollout_with_hint")
             env_id, seed = env.get("env_id"), env.get("seed")
             if not isinstance(env_id, str) or not env_id or type(seed) is not int:
                 raise ValueError(f"Training row {number} requires an environment ID and integer seed")
@@ -334,21 +339,29 @@ def load_config(path: Path, max_steps: int | None = None, epochs: int | None = N
 
 
 def write_selected_dataset(cfg: dict, path: Path) -> None:
-    """Materialize the author-filtered JSONL consumed by Swift."""
-    if cfg["author"] is None:
+    """Materialize selected rows with the requested rollout hint level."""
+    if cfg["author"] is None and not cfg["rollout_with_hint"]:
         return
     manifest = json.loads((cfg["export_dir"] / "manifest.json").read_text(encoding="utf-8"))
     selected_ids = {
-        row["id"] for row in manifest["environments"] if row.get("author") == cfg["author"]
+        row["id"] for row in manifest["environments"]
+        if cfg["author"] is None or row.get("author") == cfg["author"]
     }
     selected_lines = []
     with cfg["dataset"].open(encoding="utf-8") as stream:
         for line in stream:
-            if line.strip() and json.loads(line)["env_config"]["env_id"] in selected_ids:
-                selected_lines.append(line if line.endswith("\n") else line + "\n")
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row["env_config"]["env_id"] in selected_ids:
+                if cfg["rollout_with_hint"]:
+                    row["env_config"]["hint_level"] = 1
+                    selected_lines.append(json.dumps(row, ensure_ascii=False) + "\n")
+                else:
+                    selected_lines.append(line if line.endswith("\n") else line + "\n")
     if len(selected_lines) != cfg["dataset_rows"]:
         raise ValueError(
-            f"Author-filtered dataset changed after validation: "
+            f"Selected dataset changed after validation: "
             f"expected {cfg['dataset_rows']} rows, got {len(selected_lines)}"
         )
     path.write_text("".join(selected_lines), encoding="utf-8")
@@ -375,7 +388,8 @@ def docker_command(
     cfg: dict, run_dir: Path, container_name: str, rootless: bool = False,
 ) -> tuple[list[str], Path]:
     checkpoint_dir = run_dir / "checkpoint"
-    training_dataset = run_dir / "selected_dataset.jsonl" if cfg["author"] is not None else cfg["dataset"]
+    training_dataset = (run_dir / "selected_dataset.jsonl"
+                        if cfg["author"] is not None or cfg["rollout_with_hint"] else cfg["dataset"])
     online_wandb = cfg["wandb_enabled"] and cfg["wandb_mode"] == "online"
     command = [
         "docker", "run", "--rm", "--init", "--name", container_name,

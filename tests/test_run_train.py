@@ -27,6 +27,7 @@ class TrainingLauncherTests(unittest.TestCase):
     def test_hint_resampling_is_opt_in_and_controls_refill(self):
         cfg = self.config(remove_constant_reward_groups=True)
         self.assertFalse(cfg["sage_hint_resampling"])
+        self.assertFalse(cfg["rollout_with_hint"])
         command, _ = docker_command(cfg, ROOT / "outputs/training/test-plain", "test-plain")
         self.assertIn("SPADE_SAGE_HINT_RESAMPLING=false", command)
         self.assertIn("SPADE_MAX_ROLLOUT_ATTEMPTS=1", command)
@@ -214,6 +215,38 @@ class TrainingLauncherTests(unittest.TestCase):
             self.assertTrue(any(item.startswith("DATASET=") and item.endswith("/selected_dataset.jsonl")
                                 for item in command))
 
+    def test_hinted_rollout_sets_env_config_for_every_selected_row(self):
+        cfg = self.config(author="qwen3.8-27b", rollout_with_hint=True)
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            run_dir = Path(directory)
+            output = run_dir / "selected_dataset.jsonl"
+            write_selected_dataset(cfg, output)
+            rows = [json.loads(line) for line in output.read_text().splitlines()]
+            self.assertEqual(len(rows), cfg["dataset_rows"])
+            self.assertTrue(all(row["env_config"]["hint_level"] == 1 for row in rows))
+            self.assertTrue(all("hint" not in row for row in rows))
+            command, _ = docker_command(cfg, run_dir, "test-hinted")
+            self.assertIn(f"DATASET={run_dir / 'selected_dataset.jsonl'}".replace(
+                str(ROOT), "/workspace/envduels/spade"), command)
+
+    def test_hinted_rollout_without_author_materializes_full_dataset(self):
+        cfg = self.config(rollout_with_hint=True)
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            output = Path(directory) / "selected_dataset.jsonl"
+            write_selected_dataset(cfg, output)
+            rows = [json.loads(line) for line in output.read_text().splitlines()]
+            self.assertEqual(len(rows), cfg["dataset_rows"])
+            self.assertTrue(all(row["env_config"]["hint_level"] == 1 for row in rows))
+
+    def test_hinted_rollout_requires_saved_hints(self):
+        with patch("spade.core.envduels_hints.load_hint_levels", return_value=()):
+            with self.assertRaisesRegex(ValueError, "requires an author hint"):
+                self.config(rollout_with_hint=True)
+
+    def test_hinted_rollout_and_sage_are_mutually_exclusive(self):
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            self.config(rollout_with_hint=True, sage_hint_resampling=True)
+
     def test_unknown_and_invalid_author_are_rejected(self):
         for author, message in (("missing-author", "available authors"), ("", "nonempty"), (1, "nonempty")):
             with self.subTest(author=author), self.assertRaisesRegex(ValueError, message):
@@ -245,6 +278,7 @@ class TrainingLauncherTests(unittest.TestCase):
             {"trajectories_per_game": 1, "batch_size": 6},
             {"batch_size": 16},
             {"dataset_shuffle": "true"},
+            {"rollout_with_hint": "true"},
             {"reward_normalization": "typo"},
             {"ppo_clip_low": 0.3, "ppo_clip_high": 0.2},
             {"fixed_pool_seed": -1},

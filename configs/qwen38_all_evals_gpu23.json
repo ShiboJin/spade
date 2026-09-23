@@ -52,13 +52,6 @@
         "config": "eval_offline/configs/games_rg_only.yaml",
         "request_timeout_seconds": 7200,
         "suites": ["gem"]
-      },
-      {
-        "name": "acebench-multi-turn",
-        "type": "suite",
-        "config": "eval_offline/configs/acebench_agent_multi_turn.yaml",
-        "suites": ["acebench"],
-        "max_concurrent": 16
       }
     ]
   }

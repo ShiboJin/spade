@@ -18,6 +18,14 @@ full exported pool but materializes a run-local dataset containing only that
 author's environments, and Swift trains exclusively on those rows. Leave it as
 `null` or omit it to train on every environment in the export.
 
+Set the optional training setting `rollout_with_hint` to `true` to include each
+environment's first author hint in the initial observation for every rollout.
+The launcher writes a run-local dataset with `env_config.hint_level=1`; the hint
+text is read from the export's `privileged.json` by the rollout environment.
+The default is `false`, so ordinary rollouts have no hint. Hinted rollout mode
+requires a saved hint for every selected environment and cannot be combined
+with `sage_hint_resampling`, which starts with an unhinted rollout.
+
 ```bash
 # Existing low-memory profile (8 x RTX 4090)
 python3 scripts/run_train.py --config configs/train_qwen38_envduels_lora.json

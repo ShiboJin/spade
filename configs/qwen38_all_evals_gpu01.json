@@ -47,6 +47,16 @@
     "seed": 42,
     "evaluations": [
       {
+        "name": "aime25",
+        "type": "jsonl",
+        "data": "data/aime25/aime2025.jsonl"
+      },
+      {
+        "name": "aime26",
+        "type": "jsonl",
+        "data": "data/aime26/aime2026.jsonl"
+      },
+      {
         "name": "livecodebench",
         "type": "suite",
         "config": "eval_offline/configs/games_lcb_only.yaml",
@@ -57,6 +67,13 @@
         "name": "acebench-multi-step",
         "type": "suite",
         "config": "eval_offline/configs/acebench_agent_multi_step.yaml",
+        "suites": ["acebench"],
+        "max_concurrent": 16
+      },
+      {
+        "name": "acebench-multi-turn",
+        "type": "suite",
+        "config": "eval_offline/configs/acebench_agent_multi_turn.yaml",
         "suites": ["acebench"],
         "max_concurrent": 16
       }
