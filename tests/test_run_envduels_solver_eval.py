@@ -6,6 +6,7 @@ import unittest
 
 from scripts.run_envduels_solver_eval import (
     DEFAULTS,
+    LocalOpenAIClient,
     build_ranking,
     docker_command,
     episode_key,
@@ -20,6 +21,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class EnvDuelsSolverEvalTests(unittest.TestCase):
+    def test_http_requests_can_use_more_than_default_32_workers(self):
+        cfg = self.config()
+        cfg["max_concurrent_episodes"] = 64
+
+        def request(_messages, _seed):
+            return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+
+        client = LocalOpenAIClient(cfg, "http://localhost")
+        try:
+            self.assertEqual(client.executor._max_workers, 64)
+            client._request = request
+            result = asyncio.run(client.chat([], 1))
+            self.assertEqual(result["text"], "ok")
+        finally:
+            client.close()
+
     def config(self):
         return {
             **DEFAULTS,

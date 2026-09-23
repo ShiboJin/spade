@@ -161,7 +161,10 @@ class TrainingLauncherTests(unittest.TestCase):
         self.assertNotIn("--publish", command)
         self.assertEqual(command[command.index("--memory") + 1], "160g")
         self.assertEqual(command[command.index("--memory-swap") + 1], "160g")
-        self.assertEqual(command[command.index("--memory-swappiness") + 1], "0")
+        if Path("/sys/fs/cgroup/cgroup.controllers").exists():
+            self.assertNotIn("--memory-swappiness", command)
+        else:
+            self.assertEqual(command[command.index("--memory-swappiness") + 1], "0")
         self.assertIn("SPADE_MEMORY_LIMIT_GIB=160", command)
         self.assertIn("USER=envduels", command)
         self.assertIn("PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True", command)

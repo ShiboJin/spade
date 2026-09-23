@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -259,6 +260,10 @@ class LocalOpenAIClient:
     def __init__(self, cfg: dict, base_url: str):
         self.cfg = cfg
         self.url = base_url.rstrip("/") + "/v1/chat/completions"
+        self.executor = ThreadPoolExecutor(max_workers=cfg["max_concurrent_episodes"])
+
+    def close(self) -> None:
+        self.executor.shutdown(wait=True)
 
     def _request(self, messages: list[dict], request_seed: int) -> dict:
         payload = {
@@ -289,7 +294,9 @@ class LocalOpenAIClient:
         last = None
         for attempt in range(self.cfg["request_retries"]):
             try:
-                result = await asyncio.to_thread(self._request, messages, request_seed)
+                result = await asyncio.get_running_loop().run_in_executor(
+                    self.executor, self._request, messages, request_seed
+                )
                 choice = result["choices"][0]
                 content = choice["message"].get("content") or ""
                 return {
@@ -667,6 +674,7 @@ async def evaluate_cases(cfg: dict, out: Path, base_url: str, retry_errors: bool
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        client.close()
     write_progress(cfg, cases, existing, out)
     report = build_ranking(cfg, existing, out)
     new = next(row for row in report["ranking"] if row["model"] == cfg["solver_name"])

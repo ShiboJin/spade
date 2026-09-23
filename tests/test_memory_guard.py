@@ -11,6 +11,14 @@ from scripts import memory_guard as guard
 
 
 class MemoryGuardTests(unittest.TestCase):
+    def test_swappiness_only_on_cgroup_v1(self):
+        v1 = guard.docker_memory_args(96, cgroup_version="1")
+        v2 = guard.docker_memory_args(96, cgroup_version="2")
+        self.assertEqual(v1[:4], ["--memory", "96g", "--memory-swap", "96g"])
+        self.assertEqual(v2[:4], v1[:4])
+        self.assertEqual(v1[v1.index("--memory-swappiness") + 1], "0")
+        self.assertNotIn("--memory-swappiness", v2)
+
     def test_gpu_locks_across_processes_and_release_on_exit(self):
         # A real separate launcher holds GPUs, with only Docker/RAM probing mocked.
         code = '''

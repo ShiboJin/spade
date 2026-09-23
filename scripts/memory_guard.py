@@ -22,9 +22,15 @@ def memory_available():
     return int(fields["MemAvailable"].split()[0]) * 1024
 
 
-def docker_memory_args(limit_gib):
-    return ["--memory", f"{limit_gib}g", "--memory-swap", f"{limit_gib}g",
-            "--memory-swappiness", "0", "--label", "spade.memory-guard=true"]
+def docker_memory_args(limit_gib, *, cgroup_version=None):
+    if cgroup_version is None:
+        cgroup_version = "2" if Path("/sys/fs/cgroup/cgroup.controllers").exists() else "1"
+    args = ["--memory", f"{limit_gib}g", "--memory-swap", f"{limit_gib}g"]
+    # Docker ignores memory-swappiness on cgroup v2; the equal memory/swap
+    # limits still enforce zero swap, which verify_container_limits checks.
+    if str(cgroup_version) == "1":
+        args += ["--memory-swappiness", "0"]
+    return args + ["--label", "spade.memory-guard=true"]
 
 
 def preflight(limit_gib, reserve_gib):
