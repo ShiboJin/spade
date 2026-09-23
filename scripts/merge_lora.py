@@ -3,11 +3,15 @@
 The source model and adapter are mounted read-only.  The destination must not
 already exist, so this command can never overwrite the base checkpoint.
 
-Plan only:
+Plan this run's checkpoint-24 merge:
   python scripts/merge_lora.py
 
 Run the merge:
   python scripts/merge_lora.py --run
+
+Merge another checkpoint:
+  python scripts/merge_lora.py --adapter outputs/training/RUN/checkpoint/VERSION/checkpoint-N \
+    --output checkpoints/my-merged-model --run
 """
 from __future__ import annotations
 
@@ -24,11 +28,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE = ROOT / "checkpoints/Qwen3.8-27B"
 DEFAULT_ADAPTER = (
     ROOT
-    / "outputs/training/20260921T141448.271725Z/checkpoint/"
-    "v0-20260921-141518/checkpoint-19"
+    / "outputs/training/20260922T102058.777696Z/checkpoint/"
+    "v0-20260922-102143/checkpoint-24"
 )
-DEFAULT_OUTPUT = ROOT / "checkpoints/Qwen3.8-27B-spade-merged-ckpt19"
-DEFAULT_IMAGE = "envduels-unified:cu124"
+DEFAULT_OUTPUT = ROOT / "checkpoints/Qwen3.8-27B-spade-merged-ckpt24"
+DEFAULT_IMAGE = "envduels-unified:cu124-wandb"
 GIB = 1024**3
 
 
@@ -41,14 +45,14 @@ def staging_path(output: Path) -> Path:
 
 
 def validate_inputs(base: Path, adapter: Path, output: Path) -> None:
+    if output == base or output == adapter or output.is_relative_to(base) or output.is_relative_to(adapter):
+        raise ValueError("Output must be separate from the base and adapter")
     if output.exists():
         raise FileExistsError(f"Refusing to overwrite existing output: {output}")
     if staging_path(output).exists():
         raise FileExistsError(
             f"Previous merge staging directory exists: {staging_path(output)}"
         )
-    if output == base or output == adapter:
-        raise ValueError("Output must be separate from the base and adapter")
     if not (base / "config.json").is_file():
         raise FileNotFoundError(f"Base model config not found: {base / 'config.json'}")
     if not (base / "model.safetensors.index.json").is_file():
@@ -65,9 +69,11 @@ def validate_inputs(base: Path, adapter: Path, output: Path) -> None:
     if base_cfg.get("model_type") != "qwen3_5":
         raise ValueError("Expected the Qwen3.5/Qwen3.8 base checkpoint")
 
-    output.parent.mkdir(parents=True, exist_ok=True)
     required = directory_size(base) + 10 * GIB
-    available = shutil.disk_usage(output.parent).free
+    disk_path = next((parent for parent in (output.parent, *output.parents) if parent.exists()), None)
+    if disk_path is None:
+        raise FileNotFoundError(f"No existing parent directory for output: {output}")
+    available = shutil.disk_usage(disk_path).free
     if available < required:
         raise OSError(
             f"Insufficient disk space: need at least {required / GIB:.1f} GiB, "
@@ -130,6 +136,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--image", default=DEFAULT_IMAGE)
     parser.add_argument("--memory-gib", type=int, default=96)
+    parser.add_argument("--sudo-docker", action="store_true", help="Run Docker through passwordless sudo")
     parser.add_argument("--run", action="store_true")
     args = parser.parse_args()
 
@@ -140,12 +147,15 @@ def main() -> int:
         raise ValueError("Merging this 27B BF16 model requires at least 64 GiB")
     validate_inputs(base, adapter, output)
     command = docker_command(base, adapter, output, args.image, args.memory_gib)
+    if args.sudo_docker:
+        command = ["sudo", "-n", *command]
     print("Command:")
     print(" ".join(command))
     if not args.run:
         print("Plan only; add --run to merge the checkpoint.")
         return 0
     staging = staging_path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
     staging.mkdir()
     try:
         subprocess.run(command, check=True)

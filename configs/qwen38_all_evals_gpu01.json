@@ -1,6 +1,6 @@
 {
   "evaluation": {
-    "checkpoint": "checkpoints/Qwen3.8-27B-spade-merged-ckpt19",
+    "checkpoint": "checkpoints/Qwen3.8-27B-spade-merged-ckpt24",
     "output_dir": "outputs/evaluation/qwen38-gpu01",
     "hf_cache_dir": "outputs/hf-cache",
     "image": "envduels-unified:cu124",
@@ -43,25 +43,19 @@
     "min_p": 0.0,
     "presence_penalty": 1.5,
     "repetition_penalty": 1.0,
-    "max_tokens": 16384,
+    "max_tokens": 32768,
     "seed": 42,
     "evaluations": [
       {
-        "name": "aime25",
-        "type": "jsonl",
-        "data": "data/aime25/aime2025.jsonl"
-      },
-      {
         "name": "livecodebench",
         "type": "suite",
-        "context_length": 32768,
         "config": "eval_offline/configs/games_lcb_only.yaml",
+        "request_timeout_seconds": 7200,
         "suites": ["gem"]
       },
       {
         "name": "acebench-multi-step",
         "type": "suite",
-        "context_length": 32768,
         "config": "eval_offline/configs/acebench_agent_multi_step.yaml",
         "suites": ["acebench"],
         "max_concurrent": 16

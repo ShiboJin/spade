@@ -32,6 +32,11 @@ class MergeLoraTests(unittest.TestCase):
             with self.assertRaisesRegex(FileExistsError, "Refusing to overwrite"):
                 validate_inputs(path / "base", path / "adapter", path)
 
+    def test_output_cannot_be_inside_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            with self.assertRaisesRegex(ValueError, "separate"):
+                validate_inputs(path / "base", path / "adapter", path / "base/merged")
 
 if __name__ == "__main__":
     unittest.main()

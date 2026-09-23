@@ -1,4 +1,5 @@
 import json
+import asyncio
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,6 +10,8 @@ from scripts.run_envduels_solver_eval import (
     docker_command,
     episode_key,
     load_cases,
+    play_case,
+    validate_export_matches_baseline,
     validate_config,
 )
 
@@ -20,7 +23,7 @@ class EnvDuelsSolverEvalTests(unittest.TestCase):
     def config(self):
         return {
             **DEFAULTS,
-            "checkpoint": str(ROOT / "checkpoints/Qwen3.8-27B-spade-merged-ckpt19"),
+            "checkpoint": str(ROOT / "checkpoints/Qwen3.8-27B-spade-merged-ckpt24"),
             "export_dir": str(ROOT.parent / "exports/duel_harness_004_rl"),
             "baseline_run": str(ROOT.parent / "exports/duel_harness_004_push"),
             "output_dir": "/tmp/result",
@@ -28,11 +31,13 @@ class EnvDuelsSolverEvalTests(unittest.TestCase):
 
     def test_full_export_selects_four_seeds_for_ninety_environments(self):
         cfg = self.config()
+        validate_export_matches_baseline(Path(cfg["export_dir"]), Path(cfg["baseline_run"]))
         cases, digest = load_cases(cfg)
-        self.assertEqual(len(cases), 360)
+        self.assertEqual(len(cases), 720)
         self.assertEqual(len({case["env_id"] for case in cases}), 90)
         self.assertEqual(len(digest), 64)
-        self.assertEqual(len({episode_key(case) for case in cases}), 360)
+        self.assertEqual(len({episode_key(case) for case in cases}), 720)
+        self.assertEqual({case["condition"] for case in cases}, {"without_hint", "with_hint"})
 
     def test_docker_command_uses_exactly_selected_gpus_and_read_only_inputs(self):
         cfg = self.config()
@@ -53,19 +58,68 @@ class EnvDuelsSolverEvalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "tensor_parallel"):
             validate_config(cfg)
 
-    def test_ranking_adds_solver_and_uses_terminal_results_only(self):
+    def test_ranking_uses_terminal_results_and_adds_solver(self):
         cfg = self.config()
         cfg["solver_name"] = "new-solver"
         cfg["max_environments"] = 1
         cfg["seeds_per_environment"] = 1
         case = load_cases(cfg)[0][0]
-        rows = {episode_key(case): {**case, "key": episode_key(case), "status": "success"}}
+        hinted = {**case, "condition": "with_hint"}
+        rows = {
+            episode_key(case): {**case, "key": episode_key(case), "status": "success"},
+            episode_key(hinted): {**hinted, "key": episode_key(hinted), "status": "failure"},
+        }
         with tempfile.TemporaryDirectory() as directory:
             result = build_ranking(cfg, rows, Path(directory))
             saved = json.loads((Path(directory) / "ranking_solver.json").read_text())
         self.assertEqual(result, saved)
         new = next(row for row in result["ranking"] if row["model"] == "new-solver")
         self.assertEqual(new["canonical_autonomous_solve"], 1.0)
+        self.assertEqual(new["hint_gain"], -1.0)
+        self.assertEqual(new["overall"]["without_hint"]["accuracy"], 1.0)
+        self.assertEqual(new["overall"]["with_hint"]["accuracy"], 0.0)
+        self.assertIsNone(new["design_rank"])
+        self.assertEqual(new["solve_rank"], 1)
+        self.assertEqual(len(result["ranking"]), 10)
+        self.assertEqual(next(row for row in result["ranking"] if row["model"] == "qwen3.8-27b")["hint_gain"], 0.12179487179487179)
+
+    def test_hint_is_only_in_hinted_first_prompt(self):
+        class Instance:
+            def reset(self):
+                return "initial observation", {}
+
+            def step(self, response):
+                return "done", 1.0, True, False, {}
+
+            def close(self):
+                pass
+
+        class Adapter:
+            def create_instance_with_seed(self, env_id, seed):
+                return Instance()
+
+            def get_hint_levels(self, env_id):
+                return ("secret strategy",)
+
+        class Client:
+            def __init__(self):
+                self.messages = []
+
+            async def chat(self, messages, request_seed):
+                self.messages.append(messages)
+                return {"text": "\\boxed{WIN}", "usage": {}, "finish_reason": "stop"}
+
+        cfg = self.config()
+        case = load_cases(cfg)[0][0]
+        client = Client()
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            (out / "trajectories").mkdir()
+            for condition in ("without_hint", "with_hint"):
+                row = asyncio.run(play_case(cfg, Adapter(), client, {**case, "condition": condition}, out))
+                self.assertEqual(row["status"], "success")
+            self.assertNotIn("secret strategy", client.messages[0][1]["content"])
+            self.assertIn("secret strategy", client.messages[1][1]["content"])
 
 
 if __name__ == "__main__":

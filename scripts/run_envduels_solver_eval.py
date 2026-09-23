@@ -1,13 +1,12 @@
-"""Evaluate a local checkpoint as an unhinted EnvDuels solver and rank it.
+"""Evaluate a local checkpoint on both EnvDuels hint conditions and rank it.
 
 The host process validates inputs and launches one isolated Docker container on
-the requested GPUs.  Inside the container, a local vLLM OpenAI server is started
-and every exported environment is played on its frozen benchmark seeds.
+the requested GPUs. Inside the container, a local vLLM OpenAI server plays the
+RL export's frozen benchmark seeds. Push snapshot episodes provide original-model
+comparison results without changing the environment played by the checkpoint.
 
 Results are append-only and resumable: one summary row and one full trajectory
-are written per environment/seed pair.  Ranking uses the frozen source-run
-episodes as the baseline and reports both the canonical self-author-excluded
-score and a same-environment direct solver comparison.
+are written per environment/seed/condition.
 """
 from __future__ import annotations
 
@@ -47,10 +46,10 @@ SYSTEM_PROMPT = (
 )
 TERMINAL = {"success", "failure"}
 DEFAULTS = {
-    "checkpoint": "checkpoints/Qwen3.8-27B-spade-merged-ckpt19",
+    "checkpoint": "checkpoints/Qwen3.8-27B-spade-merged-ckpt24",
     "export_dir": "../exports/duel_harness_004_rl",
     "baseline_run": "../exports/duel_harness_004_push",
-    "output_dir": "outputs/envduels_solver_eval/qwen38-spade-ckpt19",
+    "output_dir": "outputs/envduels_solver_eval/qwen38-spade-ckpt24-rl",
     "image": "envduels-unified:cu124",
     "gpu_ids": [0, 1],
     "tensor_parallel": 2,
@@ -60,8 +59,8 @@ DEFAULTS = {
     "max_num_seqs": 64,
     "max_num_batched_tokens": 8192,
     "enforce_eager": True,
-    "served_model_name": "qwen38-spade-ckpt19",
-    "solver_name": "qwen3.8-27b-spade-ckpt19",
+    "served_model_name": "qwen38-spade-ckpt24",
+    "solver_name": "qwen3.8-27b-spade-ckpt24",
     "temperature": 0.8,
     "top_p": 0.95,
     "top_k": 50,
@@ -185,12 +184,37 @@ def validate_inputs(cfg: dict) -> dict:
         raise FileNotFoundError(f"EnvDuels manifest not found: {export}")
     if not (baseline / "run.json").is_file():
         raise FileNotFoundError(f"Baseline run.json not found: {baseline}")
+    validate_export_matches_baseline(export, baseline)
     cases, manifest_hash = load_cases(cfg)
     return {
         "environment_count": len({case["env_id"] for case in cases}),
         "episode_count": len(cases),
         "manifest_sha256": manifest_hash,
     }
+
+
+def validate_export_matches_baseline(export: Path, baseline: Path) -> None:
+    """Check the runnable RL export against the push ranking snapshot."""
+    manifest = read_json(export / "manifest.json")
+    matrix = read_json(baseline / "run.json")
+    rows = {row["id"]: row for row in manifest["environments"]}
+    if len(rows) != 90 or len(matrix["environments"]) != 90:
+        raise ValueError("Expected 90 hardened environments in both exports")
+    for item in matrix["environments"]:
+        env_id = item["path"] + "/harden_01"
+        row = rows.get(env_id)
+        version = baseline / env_id
+        if row is None or not (version / "env.py").is_file():
+            raise ValueError(f"Missing hardened environment in either export: {env_id}")
+        report = read_json(version / "run.json")
+        metadata = read_json(export / row["metadata"])
+        privileged = read_json(export / row["privileged"])
+        digest = hashlib.sha256((version / "env.py").read_bytes()).hexdigest()
+        if (row["source_sha256"] != digest or
+                hashlib.sha256((export / row["source"]).read_bytes()).hexdigest() != digest or
+                metadata["benchmark_seeds"] != report.get("seeds") or
+                privileged["hints"].get("hint") != report.get("hint")):
+            raise ValueError(f"Runnable export differs from ranking snapshot: {env_id}")
 
 
 def load_cases(cfg: dict) -> tuple[list[dict], str]:
@@ -209,19 +233,20 @@ def load_cases(cfg: dict) -> tuple[list[dict], str]:
         if cfg["seeds_per_environment"] is not None:
             seeds = seeds[: cfg["seeds_per_environment"]]
         for episode, seed in enumerate(seeds):
-            cases.append({
-                "env_id": row["id"], "author": row["author"],
-                "domain": row["domain"], "episode": episode, "seed": seed,
-                "source_sha256": row["source_sha256"],
-                "max_turns": row["max_turns"],
-            })
+            for condition in ("without_hint", "with_hint"):
+                cases.append({
+                    "env_id": row["id"], "author": row["author"],
+                    "domain": row["domain"], "episode": episode, "seed": seed,
+                    "condition": condition, "source_sha256": row["source_sha256"],
+                    "max_turns": row["max_turns"],
+                })
     if not cases:
         raise ValueError("No evaluation cases selected")
     return cases, hashlib.sha256(raw).hexdigest()
 
 
 def episode_key(case: dict) -> str:
-    return f"{case['env_id']}|{case['seed']}|without_hint"
+    return f"{case['env_id']}|{case['seed']}|{case.get('condition', 'without_hint')}"
 
 
 def trajectory_name(case: dict) -> str:
@@ -287,13 +312,16 @@ async def play_case(cfg: dict, adapter: EnvDuelsAdapter, client: LocalOpenAIClie
     status = "incomplete"
     stop_reason = "not_started"
     error = None
+    hint = None
     total_usage = defaultdict(int)
     try:
         instance = adapter.create_instance_with_seed(case["env_id"], case["seed"])
         observation, reset_info = instance.reset()
+        hint = adapter.get_hint_levels(case["env_id"])[0] if case["condition"] == "with_hint" else None
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": (
+                (f"Hint: {hint}\n\n" if hint is not None else "") +
                 f"Observation: {observation}\n\n"
                 "Respond with exactly one action for this turn inside \\boxed{}."
             )},
@@ -341,14 +369,15 @@ async def play_case(cfg: dict, adapter: EnvDuelsAdapter, client: LocalOpenAIClie
     finished = datetime.now(timezone.utc).isoformat()
     summary = {
         **case, "key": episode_key(case), "solver": cfg["solver_name"],
-        "condition": "without_hint", "trial": 0, "status": status,
+        "condition": case["condition"], "trial": 0, "status": status,
         "turns": len(steps), "stop_reason": stop_reason, "error": error,
         "usage": dict(total_usage), "started_at": started, "finished_at": finished,
         "trajectory": f"trajectories/{trajectory_name(case)}",
     }
     trajectory = {
         "protocol": "envduels_local_solver_v1", "summary": summary,
-        "system_prompt": SYSTEM_PROMPT, "reset_info": reset, "steps": steps,
+        "system_prompt": SYSTEM_PROMPT, "hint": hint if case["condition"] == "with_hint" else None,
+        "reset_info": reset, "steps": steps,
     }
     write_json(out / summary["trajectory"], trajectory)
     return summary
@@ -366,6 +395,16 @@ def load_existing(path: Path) -> dict[str, dict]:
             raise ValueError(f"Duplicate result key on line {number}: {row['key']}")
         rows[row["key"]] = row
     return rows
+
+
+def validate_existing(rows: dict[str, dict], cases: list[dict], solver: str) -> None:
+    expected = {episode_key(case): case for case in cases}
+    for key, row in rows.items():
+        case = expected.get(key)
+        if case is None or row.get("solver") != solver or any(
+                row.get(field) != case[field]
+                for field in ("env_id", "episode", "seed", "condition", "source_sha256")):
+            raise ValueError(f"Saved episode does not match this evaluation: {key}")
 
 
 def append_jsonl(path: Path, row: dict) -> None:
@@ -396,96 +435,189 @@ def domain_score(env_scores: dict[str, float], env_meta: dict[str, dict],
 
 def baseline_scores(root: Path) -> tuple[list[str], dict, dict]:
     matrix = read_json(root / "run.json")
-    models = [row["name"] for row in matrix["models"]]
-    env_meta, scores = {}, {model: {} for model in models}
+    models = [item["name"] for item in matrix["models"]]
+    env_meta = {}
+    plays = {model: defaultdict(dict) for model in models}
     for item in matrix["environments"]:
-        env_root = root / item["path"]
-        relative = item.get("final_env")
-        if not isinstance(relative, str):
-            continue
-        folder = (env_root / relative).parent
-        report_path = folder / "run.json"
+        env_id = item["path"] + "/harden_01"
+        report_path = root / env_id / "run.json"
+        env_meta[env_id] = {"author": item["designer"], "domain": item["domain"]}
         if not report_path.is_file():
             continue
-        report = read_json(report_path)
-        env_id = str(folder.relative_to(root))
-        env_meta[env_id] = {"author": item["designer"], "domain": item["domain"]}
-        grouped = defaultdict(list)
-        for episode in report.get("episodes", []):
-            if episode.get("condition", "without_hint") != "without_hint":
+        for episode in read_json(report_path).get("episodes", []):
+            model = episode.get("breaker")
+            if model not in plays or episode.get("status") not in TERMINAL:
                 continue
-            if episode.get("status") in TERMINAL and episode.get("breaker") in scores:
-                grouped[episode["breaker"]].append(episode["status"] == "success")
-        for model, values in grouped.items():
-            scores[model][env_id] = mean(values)
-    return models, env_meta, scores
+            key = (episode.get("episode"), episode.get("seed"),
+                   episode.get("trial", 0), episode.get("condition", "without_hint"))
+            plays[model][env_id][key] = episode["status"] == "success"
+    return models, env_meta, plays
+
+
+def condition_summary(records: dict, condition: str) -> dict:
+    values = [int(value) for key, value in records.items() if key[3] == condition]
+    return {"successes": sum(values), "attempted": len(values),
+            "accuracy": mean(values)}
+
+
+def matched_pairs(records: dict) -> list[tuple[bool, bool]]:
+    before = {key[:3]: value for key, value in records.items() if key[3] == "without_hint"}
+    after = {key[:3]: value for key, value in records.items() if key[3] == "with_hint"}
+    return [(before[key], after[key]) for key in before.keys() & after.keys()]
 
 
 def build_ranking(cfg: dict, result_rows: dict[str, dict], out: Path) -> dict:
-    models, env_meta, scores = baseline_scores(Path(cfg["baseline_run"]))
-    new_grouped = defaultdict(list)
+    models, env_meta, plays = baseline_scores(Path(cfg["baseline_run"]))
+    solver = cfg["solver_name"]
+    if solver in models:
+        raise ValueError("solver_name must differ from original model names")
+    plays[solver] = defaultdict(dict)
     for row in result_rows.values():
         if row["status"] in TERMINAL:
-            new_grouped[row["env_id"]].append(row["status"] == "success")
-    scores[cfg["solver_name"]] = {env_id: mean(values) for env_id, values in new_grouped.items()}
-    all_models = models + [cfg["solver_name"]]
-    common = set(env_meta)
-    for model in all_models:
-        common &= set(scores[model])
+            key = (row["episode"], row["seed"], row.get("trial", 0), row["condition"])
+            plays[solver][row["env_id"]][key] = row["status"] == "success"
+    all_models = models + [solver]
+    scores = {model: {} for model in all_models}
+    environment_rows = []
+    for env_id, meta in sorted(env_meta.items()):
+        per_model = {}
+        for model in all_models:
+            records = plays[model].get(env_id, {})
+            conditions = {condition: condition_summary(records, condition)
+                          for condition in ("without_hint", "with_hint")}
+            paired = matched_pairs(records)
+            per_model[model] = {
+                "conditions": conditions, "matched_pairs": len(paired),
+                "hint_gain": mean(int(after) - int(before) for before, after in paired),
+                "hint_rescue": mean(int(after) for before, after in paired if not before),
+                "hint_harm": mean(int(not after) for before, after in paired if before),
+            }
+            if conditions["without_hint"]["accuracy"] is not None:
+                scores[model][env_id] = conditions["without_hint"]["accuracy"]
+        panel = [model for model in models if model != meta["author"]]
+        seeds = {key[:2] for model in panel for key in plays[model].get(env_id, {})
+                 if key[3] == "without_hint"}
+        seed_discrimination = []
+        for episode, seed in seeds:
+            rates = []
+            for model in panel:
+                values = [int(value) for key, value in plays[model].get(env_id, {}).items()
+                          if key[:2] == (episode, seed) and key[3] == "without_hint"]
+                if not values:
+                    break
+                rates.append(mean(values))
+            if len(rates) == len(panel) and len(rates) >= 2:
+                denominator = len(rates) ** 2 // 4
+                seed_discrimination.append(sum(abs(a - b) for i, a in enumerate(rates)
+                                               for b in rates[i + 1:]) / denominator)
+        peer_pairs = [pair for model in panel
+                      for pair in matched_pairs(plays[model].get(env_id, {}))]
+        environment_rows.append({
+            "env_id": env_id, **meta, "models": per_model,
+            "peer_discrimination": mean(seed_discrimination),
+            "peer_hint_effect": mean(int(after) - int(before)
+                                     for before, after in peer_pairs),
+        })
+    common = set(env_meta).intersection(*(set(scores[model]) for model in all_models))
+
+    def aggregate(rows: list[dict], model: str, condition: str) -> dict:
+        items = [row["models"][model]["conditions"][condition] for row in rows]
+        successes = sum(item["successes"] for item in items)
+        attempted = sum(item["attempted"] for item in items)
+        return {"successes": successes, "attempted": attempted,
+                "accuracy": successes / attempted if attempted else None}
 
     ranking = []
     for model in all_models:
         author = model if model in models else None
         canonical, canonical_domains = domain_score(
-            scores[model], env_meta, excluded_author=author,
-        )
+            scores[model], env_meta, excluded_author=author)
         direct, direct_domains = domain_score(scores[model], env_meta, allowed=common)
+        eligible = [row for row in environment_rows
+                    if author is None or row["author"] != author]
+        authored = [row for row in environment_rows if row["author"] == model]
+        design, design_domains = domain_score(
+            {row["env_id"]: row["peer_discrimination"] for row in authored
+             if row["peer_discrimination"] is not None}, env_meta)
+        hint_authoring, hint_author_domains = domain_score(
+            {row["env_id"]: row["peer_hint_effect"] for row in authored
+             if row["peer_hint_effect"] is not None}, env_meta)
+        paired = [pair for env_id, records in plays[model].items()
+                  if author is None or env_meta[env_id]["author"] != author
+                  for pair in matched_pairs(records)]
         ranking.append({
-            "model": model, "canonical_autonomous_solve": canonical,
+            "model": model, "autonomous_solve": canonical,
+            "canonical_autonomous_solve": canonical,
             "canonical_domain_scores": canonical_domains,
             "canonical_environment_count": sum(
-                env_id in env_meta and (author is None or env_meta[env_id]["author"] != author)
-                for env_id in scores[model]
-            ),
+                author is None or env_meta[env_id]["author"] != author
+                for env_id in scores[model]),
             "direct_common_panel_solve": direct,
             "direct_common_panel_domain_scores": direct_domains,
             "direct_common_panel_environment_count": len(common),
+            "overall": {condition: aggregate(environment_rows, model, condition)
+                        for condition in ("without_hint", "with_hint")},
+            "third_party": {condition: aggregate(eligible, model, condition)
+                            for condition in ("without_hint", "with_hint")},
+            "hint_gain": mean(int(after) - int(before) for before, after in paired),
+            "hint_matched_pairs": len(paired),
+            "hint_rescue": mean(int(after) for before, after in paired if not before),
+            "hint_harm": mean(int(not after) for before, after in paired if before),
+            "design": design, "design_domain_scores": design_domains,
+            "hint_authoring": hint_authoring,
+            "hint_author_domain_scores": hint_author_domains,
+            "design_rank": None,
         })
-    for field, rank_field in (
-        ("canonical_autonomous_solve", "canonical_rank"),
-        ("direct_common_panel_solve", "direct_common_panel_rank"),
-    ):
-        ordered = sorted(ranking, key=lambda row: (
-            row[field] is None, -(row[field] or 0), row["model"],
-        ))
+    for field, rank_field in (("canonical_autonomous_solve", "canonical_rank"),
+                              ("direct_common_panel_solve", "direct_common_panel_rank"),
+                              ("design", "design_rank")):
+        ordered = sorted((row for row in ranking if row[field] is not None),
+                         key=lambda row: (-row[field], row["model"]))
         for rank, row in enumerate(ordered, 1):
-            row[rank_field] = rank if row[field] is not None else None
-    ranking.sort(key=lambda row: (row["direct_common_panel_rank"] or 10**9, row["model"]))
+            row[rank_field] = rank
+    solver_gain = next(row["hint_gain"] for row in ranking if row["model"] == solver)
+    for row in ranking:
+        row["solve_rank"] = row.get("canonical_rank")
+        row["hint_gain_delta_vs_solver"] = (
+            row["hint_gain"] - solver_gain
+            if row["hint_gain"] is not None and solver_gain is not None else None)
+    ranking.sort(key=lambda row: (row.get("direct_common_panel_rank") or 10**9, row["model"]))
     payload = {
-        "protocol": "envduels_local_solver_ranking_v1",
+        "protocol": "envduels_local_solver_ranking_v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "solver": cfg["solver_name"], "baseline_run": cfg["baseline_run"],
+        "solver": solver, "export_dir": cfg["export_dir"],
+        "baseline_run": cfg["baseline_run"],
         "ranking_notes": {
-            "canonical": "Domain-balanced no-hint mean; original solvers exclude self-authored environments.",
-            "direct_common_panel": "All solvers evaluated on the same environment intersection; self plays retained.",
-            "seed_aggregation": "Available terminal trials average within environment before domains receive equal weight.",
+            "canonical": "Domain-balanced no-hint environment mean; original models exclude self-authored environments.",
+            "direct_common_panel": "Same environment intersection for every solver, retaining self plays.",
+            "hint_gain": "Mean(with_hint - without_hint) on matched terminal pairs; original models exclude self-authored environments.",
+            "hint_gain_delta_vs_solver": "Model hint gain minus new solver hint gain.",
+            "design": "Original authors have design scores; new solver has null design and design rank.",
         },
         "common_environment_count": len(common),
         "common_environments": sorted(common), "ranking": ranking,
     }
+    write_json(out / "environment_results.json", {
+        "protocol": "envduels_local_solver_environment_results_v2",
+        "solver": solver, "environments": environment_rows,
+    })
+    write_json(out / "solver_summary.json", next(row for row in ranking if row["model"] == solver))
     write_json(out / "ranking_solver.json", payload)
     return payload
 
 
 def write_progress(cfg: dict, cases: list[dict], rows: dict[str, dict], out: Path) -> None:
     counts = defaultdict(int)
+    by_condition = defaultdict(lambda: defaultdict(int))
     for row in rows.values():
         counts[row["status"]] += 1
+        by_condition[row["condition"]][row["status"]] += 1
     terminal = sum(counts[key] for key in TERMINAL)
     payload = {
         "status": "completed" if len(rows) == len(cases) and not counts["incomplete"] else "running",
         "total_episodes": len(cases), "recorded_episodes": len(rows),
         "terminal_episodes": terminal, "counts": dict(counts),
+        "by_condition": {key: dict(value) for key, value in by_condition.items()},
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     write_json(out / "progress.json", payload)
@@ -499,6 +631,7 @@ async def evaluate_cases(cfg: dict, out: Path, base_url: str, retry_errors: bool
     cases, _ = load_cases(cfg)
     result_path = out / "episodes.jsonl"
     existing = load_existing(result_path)
+    validate_existing(existing, cases, cfg["solver_name"])
     if retry_errors:
         existing = {key: row for key, row in existing.items() if row["status"] in TERMINAL}
         with result_path.open("w", encoding="utf-8") as stream:
@@ -522,7 +655,7 @@ async def evaluate_cases(cfg: dict, out: Path, base_url: str, retry_errors: bool
             done = len(existing)
             print(
                 f"[{done}/{len(cases)}] {row['status']:<10} "
-                f"{row['env_id']} seed={row['seed']} turns={row['turns']}",
+                f"{row['env_id']} seed={row['seed']} {row['condition']} turns={row['turns']}",
                 flush=True,
             )
 
@@ -535,12 +668,12 @@ async def evaluate_cases(cfg: dict, out: Path, base_url: str, retry_errors: bool
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
     write_progress(cfg, cases, existing, out)
-    ranking = build_ranking(cfg, existing, out)
-    new = next(row for row in ranking["ranking"] if row["model"] == cfg["solver_name"])
+    report = build_ranking(cfg, existing, out)
+    new = next(row for row in report["ranking"] if row["model"] == cfg["solver_name"])
     print(
-        f"Solver ranking: direct={new['direct_common_panel_rank']}, "
-        f"canonical={new['canonical_rank']}, "
-        f"direct score={100*(new['direct_common_panel_solve'] or 0):.2f}%",
+        f"Solver no-hint={new['overall']['without_hint']['accuracy']}, "
+        f"with-hint={new['overall']['with_hint']['accuracy']}, "
+        f"hint-gain={new['hint_gain']}, solve-rank={new['solve_rank']}",
         flush=True,
     )
 
@@ -644,18 +777,20 @@ def docker_command(cfg: dict, out: Path, name: str, retry_errors: bool) -> list[
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=ROOT / "configs/qwen38_envduels_solver_eval.json")
+    parser.add_argument("--config", type=Path, default=ROOT / "configs/qwen38_duel_harness_004_rl_solver_eval.json")
     parser.add_argument("--gpu-ids", type=int, nargs="+", help="Physical GPU indices")
+    parser.add_argument("--checkpoint", help="Local Hugging Face checkpoint directory")
+    parser.add_argument("--solver-name", help="Name for this checkpoint in result tables")
     parser.add_argument("--max-environments", type=int, help="Smoke-test prefix of environments")
     parser.add_argument("--seeds-per-environment", type=int, help="Smoke-test prefix of benchmark seeds")
     parser.add_argument("--output-dir", help="Reusable result directory (not a timestamped parent)")
     parser.add_argument("--retry-errors", action="store_true", help="Retry prior incomplete/error episodes")
-    parser.add_argument("--rank-only", action="store_true", help="Rebuild ranking from saved episodes")
+    parser.add_argument("--rank-only", action="store_true", help="Rebuild reports from saved episodes")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--inside-container", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     overrides = {}
-    for key in ("max_environments", "seeds_per_environment", "output_dir"):
+    for key in ("checkpoint", "solver_name", "max_environments", "seeds_per_environment", "output_dir"):
         value = getattr(args, key)
         if value is not None:
             overrides[key] = value
@@ -669,7 +804,11 @@ def main() -> int:
         out.mkdir(parents=True, exist_ok=True)
         (out / "trajectories").mkdir(exist_ok=True)
         if args.rank_only:
-            build_ranking(cfg, load_existing(out / "episodes.jsonl"), out)
+            cases, _ = load_cases(cfg)
+            existing = load_existing(out / "episodes.jsonl")
+            validate_existing(existing, cases, cfg["solver_name"])
+            write_progress(cfg, cases, existing, out)
+            build_ranking(cfg, existing, out)
             return 0
         with serve(cfg, out) as base_url:
             asyncio.run(evaluate_cases(cfg, out, base_url, args.retry_errors))
@@ -677,6 +816,15 @@ def main() -> int:
 
     plan = validate_inputs(cfg)
     out.mkdir(parents=True, exist_ok=True)
+    previous = out / "resolved_config.json"
+    if previous.is_file() and (out / "episodes.jsonl").is_file():
+        saved = read_json(previous)
+        important = ("checkpoint", "export_dir", "baseline_run", "solver_name", "seed",
+                     "max_environments", "seeds_per_environment", "temperature", "top_p",
+                     "top_k", "min_p", "repetition_penalty", "max_tokens_per_turn",
+                     "enable_thinking")
+        if any(saved["config"].get(key) != cfg[key] for key in important) or saved.get("manifest_sha256") != plan["manifest_sha256"]:
+            raise ValueError("Output directory contains episodes from a different evaluation; choose a new --output-dir")
     (out / "trajectories").mkdir(exist_ok=True)
     name_hash = hashlib.sha256(str(out).encode()).hexdigest()[:10]
     name = f"spade-envduels-solver-{name_hash}"
@@ -686,7 +834,11 @@ def main() -> int:
     write_json(out / "resolved_config.json", report)
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
     if args.rank_only:
-        ranking = build_ranking(cfg, load_existing(out / "episodes.jsonl"), out)
+        cases, _ = load_cases(cfg)
+        existing = load_existing(out / "episodes.jsonl")
+        validate_existing(existing, cases, cfg["solver_name"])
+        write_progress(cfg, cases, existing, out)
+        ranking = build_ranking(cfg, existing, out)
         print(json.dumps(ranking["ranking"], ensure_ascii=False, indent=2))
         return 0
     if args.dry_run:

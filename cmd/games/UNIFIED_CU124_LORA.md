@@ -189,6 +189,28 @@ Set `resume_from_checkpoint` to a previous `checkpoint-N` directory when the
 optimizer, scheduler and trainer state should be resumed; leave it `null` for a
 new run.
 
+## Merge a saved LoRA adapter
+
+`scripts/merge_lora.py` exports a separate BF16 Hugging Face checkpoint. Its
+defaults point to the 2026-09-22 run's `checkpoint-24` adapter and write to
+`checkpoints/Qwen3.8-27B-spade-merged-ckpt24`:
+
+```bash
+cd /data1/shibo517/envduels/spade
+python3 scripts/merge_lora.py --run
+```
+
+For another checkpoint, supply `--base`, `--adapter`, and `--output` as needed.
+On hosts where Docker requires passwordless sudo, add `--sudo-docker`.
+Without `--run`, the script validates paths and free disk space and prints the
+Docker command. It refuses to overwrite an existing output. The base and
+adapter are mounted read-only, and the output is checked before its directory
+gets the final name. Keep about 62 GiB free for this 27B BF16 export.
+
+The merged directory can be used as the `checkpoint` in an evaluation config.
+It is an inference checkpoint; resume training from the original adapter
+checkpoint, including its optimizer and trainer state.
+
 ## Relevant Inkling-to-ms-swift config mapping
 
 | SPADE/Inkling setting | Current setting or ms-swift behavior |
